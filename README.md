@@ -29,6 +29,32 @@
 Go + [`go.mau.fi/whatsmeow`](https://pkg.go.dev/go.mau.fi/whatsmeow)，命令行程序，本地 session 持久化。
 不使用 c-shared/JNA、不使用 Baileys、不使用 Cloud API、不使用 WebView 注入（理由见 SPEC）。
 
+## Step 1 运行
+
+```powershell
+go run ./cmd/wa-poc -data-dir ./wa-session -device-name wa-desktop-poc
+```
+
+启动后看到 `bridge_started` 表示 wrapper 和本地 session store 初始化完成。全新 session 下应随后看到 `qr_generated`，终端会打印可扫码的二维码；下方也会保留 QR payload 文本作为兜底。用测试小号在 WhatsApp 的 Linked Devices 里扫码后，看到 `connected` 表示 Step 1 跑通。
+
+程序退出时会尝试导出 `trace.json`。Step 1 的 trace 只记录二维码长度等脱敏信息，不写入 QR 完整内容。
+
+## Step 2 运行
+
+先确认测试接收号码在 [`bridge/client.go`](./bridge/client.go) 的 `allowedTestNumbers` 硬编码白名单内。号码必须是完整国家码格式，不带 `+`、空格或横线。
+
+```powershell
+go run ./cmd/wa-poc `
+  -data-dir ./wa-session `
+  -device-name wa-desktop-poc `
+  -send-to 15551234567 `
+  -text "hello from wa poc"
+```
+
+已有 session 时，程序应直接进入 `connected` / `session_restored`，随后输出 `message_send_start` 和 `message_sent`。`message_sent` 的 payload 里应包含 `clientMsgId` 和服务器返回的 `server_msg_id`。
+
+发送 trace 不记录消息正文和完整手机号，只记录文本长度、号码后四位、服务器 message ID 和延迟。
+
 ## 合规提醒
 
 whatsmeow 是非官方库，连接个人号的 Linked Device，违反 WhatsApp 条款、有封号风险。

@@ -1,0 +1,5 @@
+.gocache/
+.gomodcache/
+.gopath/
+wa-session/
+trace.json
