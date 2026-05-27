@@ -37,9 +37,28 @@ const (
 	EventMessageSent      = "message_sent"
 	EventMessageAck       = "message_ack"
 	EventMessageFailed    = "message_failed"
+	EventMessageReceived  = "message_received"
+	EventContactsSynced   = "contacts_synced"
+	EventManualReconnect  = "manual_login_reconnect"
+	EventRiskStopped      = "risk_stopped"
 )
 
 const maxSendsPerRun = 5
+
+const (
+	freshLinkContactDelay = 2 * time.Minute
+	freshLinkSendDelay    = 10 * time.Minute
+	freshLinkMarkerFile   = "fresh-linked-at"
+	riskMarkerFile        = "risk-stop.json"
+)
+
+var (
+	activeOperationMinInterval = 5 * time.Second
+	manualLoginReconnectDelay  = 2 * time.Second
+	rateLimitStopDelay         = 30 * time.Minute
+	riskStopDelay              = 24 * time.Hour
+	sendTextTimeout            = 45 * time.Second
+)
 
 var allowedTestNumbers = map[string]struct{}{
 	// Replace with the disposable test recipient in full country-code format.
@@ -47,22 +66,29 @@ var allowedTestNumbers = map[string]struct{}{
 }
 
 // EventCallback is invoked from whatsmeow/event goroutines, not from the main
-// goroutine. Android callers must switch back to the UI thread before touching UI.
-type EventCallback func(eventType string, payloadJSON string)
+// goroutine. Android callers must forward across IPC and switch back to the UI
+// thread before touching UI.
+type EventCallback interface {
+	OnEvent(eventType string, payloadJSON string)
+}
 
 type Client struct {
 	callback   EventCallback
 	dataDir    string
 	deviceName string
 
-	mu         sync.Mutex
-	state      string
-	started    bool
-	wa         waAdapter
-	hadSession bool
-	cancel     context.CancelFunc
-	sendCount  int
-	sentAt     map[string]time.Time
+	mu            sync.Mutex
+	state         string
+	started       bool
+	wa            waAdapter
+	hadSession    bool
+	cancel        context.CancelFunc
+	sendCount     int
+	sentAt        map[string]time.Time
+	freshLinkedAt time.Time
+	nextActiveAt  time.Time
+	riskUntil     time.Time
+	riskReason    string
 
 	trace traceRecorder
 	newWA func(context.Context, string, string) (waAdapter, bool, error)
@@ -72,7 +98,10 @@ type waAdapter interface {
 	AddEventHandler(func(any)) uint32
 	GetQRChannel(context.Context) (<-chan qrItem, error)
 	ConnectContext(context.Context) error
+	ReconnectAfterLogin(context.Context) error
 	SendText(context.Context, string, string, string) (sendTextResult, error)
+	GetContacts(context.Context) ([]contactInfo, error)
+	ResolveJID(context.Context, string) (string, error)
 	Disconnect()
 	Close() error
 	UserIDString() string
@@ -81,6 +110,8 @@ type waAdapter interface {
 type sendTextResult struct {
 	ServerMessageID string
 	RecipientJID    string
+	RecipientServer string
+	UsedLID         bool
 }
 
 type qrItem struct {
@@ -88,6 +119,16 @@ type qrItem struct {
 	Code    string
 	Error   error
 	Timeout time.Duration
+}
+
+type contactInfo struct {
+	JID  string `json:"jid"`
+	Name string `json:"name"`
+}
+
+type persistedRiskStop struct {
+	Until  string `json:"until"`
+	Reason string `json:"reason"`
 }
 
 func NewClient(callback EventCallback, dataDir string, deviceName string) (client *Client, err error) {
@@ -120,6 +161,8 @@ func (c *Client) Start() (err error) {
 	if err := os.MkdirAll(c.dataDir, 0o700); err != nil {
 		return err
 	}
+	freshLinkedAt := c.readFreshLinkedAt()
+	riskUntil, riskReason := c.readRiskStop()
 	ctx, cancel := context.WithCancel(context.Background())
 	adapter, hadSession, err := c.newWA(ctx, c.dataDir, c.deviceName)
 	if err != nil {
@@ -134,6 +177,9 @@ func (c *Client) Start() (err error) {
 	c.cancel = cancel
 	c.started = true
 	c.state = StateDisconnected
+	c.freshLinkedAt = freshLinkedAt
+	c.riskUntil = riskUntil
+	c.riskReason = riskReason
 	c.mu.Unlock()
 
 	c.emit(EventBridgeStarted, map[string]any{
@@ -183,6 +229,8 @@ func (c *Client) Connect() (err error) {
 	}
 
 	if err := adapter.ConnectContext(ctx); err != nil {
+		c.setState(StateDisconnected)
+		c.enterRiskStopIfNeeded("connect", err)
 		return err
 	}
 	return nil
@@ -234,6 +282,21 @@ func (c *Client) SendTextForTest(to string, text string, clientMsgId string) (er
 	defer c.recoverAsError("SendTextForTest", &err)
 
 	normalizedTo := normalizePhone(to)
+	if _, ok := allowedTestNumbers[normalizedTo]; !ok {
+		err := fmt.Errorf("recipient %q is not in the hard-coded test whitelist", maskedPhone(normalizedTo))
+		c.emitMessageFailed(clientMsgId, "not_whitelisted", err.Error())
+		return err
+	}
+	return c.sendTextChecked(normalizedTo, text, clientMsgId)
+}
+
+func (c *Client) SendText(to string, text string, clientMsgId string) (err error) {
+	defer c.recoverAsError("SendText", &err)
+	return c.sendTextChecked(strings.TrimSpace(to), text, clientMsgId)
+}
+
+func (c *Client) sendTextChecked(to string, text string, clientMsgId string) error {
+	target := strings.TrimSpace(to)
 	if clientMsgId == "" {
 		err := errors.New("clientMsgId is required")
 		c.emitMessageFailed(clientMsgId, "invalid_request", err.Error())
@@ -244,17 +307,36 @@ func (c *Client) SendTextForTest(to string, text string, clientMsgId string) (er
 		c.emitMessageFailed(clientMsgId, "invalid_request", err.Error())
 		return err
 	}
-	if _, ok := allowedTestNumbers[normalizedTo]; !ok {
-		err := fmt.Errorf("recipient %q is not in the hard-coded test whitelist", maskedPhone(normalizedTo))
-		c.emitMessageFailed(clientMsgId, "not_whitelisted", err.Error())
+	if target == "" {
+		err := errors.New("recipient is required")
+		c.emitMessageFailed(clientMsgId, "invalid_request", err.Error())
 		return err
 	}
 
 	c.mu.Lock()
+	if remaining := c.riskRemainingLocked(); remaining > 0 {
+		reason := c.riskReason
+		c.mu.Unlock()
+		err := riskStoppedError(reason, remaining)
+		c.emitMessageFailed(clientMsgId, "risk_stopped", err.Error())
+		return err
+	}
 	if c.sendCount >= maxSendsPerRun {
 		c.mu.Unlock()
 		err := fmt.Errorf("send limit exceeded: max %d messages per run", maxSendsPerRun)
 		c.emitMessageFailed(clientMsgId, "send_limit_exceeded", err.Error())
+		return err
+	}
+	if remaining := c.freshLinkRemainingLocked(freshLinkSendDelay); remaining > 0 {
+		c.mu.Unlock()
+		err := freshLinkCooldownError("sending", remaining)
+		c.emitMessageFailed(clientMsgId, "fresh_link_cooldown", err.Error())
+		return err
+	}
+	if remaining := c.activeOperationRemainingLocked(); remaining > 0 {
+		c.mu.Unlock()
+		err := activeOperationCooldownError("sending", remaining)
+		c.emitMessageFailed(clientMsgId, "operation_backoff", err.Error())
 		return err
 	}
 	if c.state != StateConnected {
@@ -265,6 +347,7 @@ func (c *Client) SendTextForTest(to string, text string, clientMsgId string) (er
 	}
 	adapter := c.wa
 	c.sendCount++
+	c.reserveActiveOperationLocked()
 	c.mu.Unlock()
 	if adapter == nil {
 		err := errors.New("whatsmeow adapter is not initialized")
@@ -275,15 +358,22 @@ func (c *Client) SendTextForTest(to string, text string, clientMsgId string) (er
 	started := time.Now()
 	startPayload := map[string]any{
 		"clientMsgId": clientMsgId,
-		"to_suffix":   maskedPhone(normalizedTo),
+		"to_suffix":   recipientSuffix(target),
 		"text_len":    len(text),
 	}
 	c.emit(EventMessageSendStart, startPayload, startPayload)
 
-	result, err := adapter.SendText(context.Background(), normalizedTo, text, clientMsgId)
+	ctx, cancel := context.WithTimeout(context.Background(), sendTextTimeout)
+	defer cancel()
+	result, err := adapter.SendText(ctx, target, text, clientMsgId)
 	if err != nil {
-		message := sanitizeError(err.Error(), normalizedTo, text)
-		c.emitMessageFailed(clientMsgId, "send_failed", message)
+		message := sanitizeError(err.Error(), target, normalizePhone(target), text)
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			c.emitMessageFailed(clientMsgId, "send_timeout", message, sendRoutePayload(result))
+			return err
+		}
+		c.emitMessageFailed(clientMsgId, "send_failed", message, sendRoutePayload(result))
+		c.enterRiskStopIfNeeded("sendText", err)
 		return err
 	}
 
@@ -296,8 +386,86 @@ func (c *Client) SendTextForTest(to string, text string, clientMsgId string) (er
 		"server_msg_id": result.ServerMessageID,
 		"latency_ms":    latencyMS,
 	}
+	for key, value := range sendRoutePayload(result) {
+		payload[key] = value
+	}
 	c.emit(EventMessageSent, payload, payload)
 	return nil
+}
+
+func (c *Client) GetContacts() (contactsJSON string, err error) {
+	defer c.recoverAsError("GetContacts", &err)
+
+	c.mu.Lock()
+	if remaining := c.riskRemainingLocked(); remaining > 0 {
+		reason := c.riskReason
+		c.mu.Unlock()
+		return "", riskStoppedError(reason, remaining)
+	}
+	adapter := c.wa
+	remaining := c.freshLinkRemainingLocked(freshLinkContactDelay)
+	if remaining > 0 {
+		c.mu.Unlock()
+		return "", freshLinkCooldownError("reading contacts", remaining)
+	}
+	if remaining := c.activeOperationRemainingLocked(); remaining > 0 {
+		c.mu.Unlock()
+		return "", activeOperationCooldownError("reading contacts", remaining)
+	}
+	if c.state != StateConnected {
+		state := c.state
+		c.mu.Unlock()
+		return "", fmt.Errorf("client state is %q, want %q", state, StateConnected)
+	}
+	c.reserveActiveOperationLocked()
+	c.mu.Unlock()
+	if adapter == nil {
+		return "", errors.New("whatsmeow adapter is not initialized")
+	}
+	contacts, err := adapter.GetContacts(context.Background())
+	if err != nil {
+		return "", err
+	}
+	if contacts == nil {
+		contacts = []contactInfo{}
+	}
+	b, err := json.Marshal(contacts)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+func (c *Client) ResolveJID(to string) (jid string, err error) {
+	defer c.recoverAsError("ResolveJID", &err)
+
+	c.mu.Lock()
+	if remaining := c.riskRemainingLocked(); remaining > 0 {
+		reason := c.riskReason
+		c.mu.Unlock()
+		return "", riskStoppedError(reason, remaining)
+	}
+	adapter := c.wa
+	if remaining := c.activeOperationRemainingLocked(); remaining > 0 {
+		c.mu.Unlock()
+		return "", activeOperationCooldownError("resolving recipient", remaining)
+	}
+	if c.state != StateConnected {
+		state := c.state
+		c.mu.Unlock()
+		return "", fmt.Errorf("client state is %q, want %q", state, StateConnected)
+	}
+	c.reserveActiveOperationLocked()
+	c.mu.Unlock()
+	if adapter == nil {
+		return "", errors.New("whatsmeow adapter is not initialized")
+	}
+	return adapter.ResolveJID(context.Background(), strings.TrimSpace(to))
+}
+
+func (c *Client) SafetyStatus() (statusJSON string, err error) {
+	defer c.recoverAsError("SafetyStatus", &err)
+	return mustJSON(c.safetyStatus()), nil
 }
 
 func (c *Client) ExportTrace(path string) (err error) {
@@ -310,6 +478,12 @@ func (c *Client) ClearSession() (err error) {
 	if err := c.Stop(); err != nil {
 		return err
 	}
+	c.mu.Lock()
+	c.freshLinkedAt = time.Time{}
+	c.riskUntil = time.Time{}
+	c.riskReason = ""
+	c.nextActiveAt = time.Time{}
+	c.mu.Unlock()
 	return os.RemoveAll(c.dataDir)
 }
 
@@ -318,6 +492,9 @@ func (c *Client) connectionParts() (waAdapter, bool, context.Context, error) {
 	defer c.mu.Unlock()
 	if !c.started || c.wa == nil || c.cancel == nil {
 		return nil, false, nil, errors.New("client is not started")
+	}
+	if remaining := c.riskRemainingLocked(); remaining > 0 {
+		return nil, false, nil, riskStoppedError(c.riskReason, remaining)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	c.cancel = cancel
@@ -365,11 +542,17 @@ func (c *Client) handleWAEvent(evt any) {
 
 	switch v := evt.(type) {
 	case *events.PairSuccess:
+		if err := c.markFreshLinkedDevice(time.Now()); err != nil {
+			c.emitError("fresh_link_marker", err.Error())
+		}
 		c.emit(EventPaired, map[string]any{
 			"jid_suffix": jidSuffix(v.ID.String()),
 		}, map[string]any{
 			"jid_suffix": jidSuffix(v.ID.String()),
 		})
+	case *events.ManualLoginReconnect:
+		c.emit(EventManualReconnect, map[string]any{}, map[string]any{})
+		go c.reconnectAfterManualLogin()
 	case *events.Connected:
 		c.setState(StateConnected)
 		if c.wasSessionRestore() {
@@ -410,10 +593,84 @@ func (c *Client) handleWAEvent(evt any) {
 			})
 			return
 		}
+		c.enterRiskStopIfNeeded("connect_failure", errors.New(v.Reason.String()))
 		c.emitError("connect_failure", v.Reason.String())
+	case *events.TemporaryBan:
+		c.enterRiskStop("temporary_ban", v.String(), riskStopDelay)
 	case *events.Receipt:
 		c.handleReceipt(v)
+	case *events.Message:
+		c.handleMessage(v)
+	case *events.Contact, *events.PushName, *events.BusinessName:
+		c.emit(EventContactsSynced, map[string]any{}, map[string]any{})
 	}
+}
+
+func (c *Client) reconnectAfterManualLogin() {
+	defer func() {
+		if r := recover(); r != nil {
+			c.emitError("manual_login_reconnect", fmt.Sprintf("panic: %v", r))
+		}
+	}()
+	time.Sleep(manualLoginReconnectDelay)
+	c.mu.Lock()
+	if remaining := c.riskRemainingLocked(); remaining > 0 {
+		reason := c.riskReason
+		c.mu.Unlock()
+		c.emitError("manual_login_reconnect", riskStoppedError(reason, remaining).Error())
+		return
+	}
+	adapter := c.wa
+	cancel := c.cancel
+	ctx, newCancel := context.WithCancel(context.Background())
+	c.cancel = newCancel
+	c.state = StateConnecting
+	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if adapter == nil {
+		c.emitError("manual_login_reconnect", "whatsmeow adapter is not initialized")
+		return
+	}
+	if err := adapter.ReconnectAfterLogin(ctx); err != nil {
+		c.setState(StateDisconnected)
+		c.enterRiskStopIfNeeded("manual_login_reconnect", err)
+		c.emitError("manual_login_reconnect", err.Error())
+	}
+}
+
+func (c *Client) handleMessage(message *events.Message) {
+	if message == nil || message.Message == nil || message.Info.IsGroup || message.Info.IsFromMe {
+		return
+	}
+	text := plainTextFromMessage(message)
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	fromJID := message.Info.Sender
+	if fromJID.IsEmpty() {
+		fromJID = message.Info.Chat
+	}
+	if fromJID.Server != "s.whatsapp.net" && fromJID.Server != "lid" {
+		return
+	}
+	ts := message.Info.Timestamp.UTC().Format("2006-01-02T15:04:05.000Z")
+	payload := map[string]any{
+		"from_jid":      fromJID.String(),
+		"from_suffix":   jidSuffix(fromJID.String()),
+		"text":          text,
+		"text_len":      len(text),
+		"server_msg_id": string(message.Info.ID),
+		"ts":            ts,
+	}
+	traceData := map[string]any{
+		"from_suffix":   jidSuffix(fromJID.String()),
+		"text_len":      len(text),
+		"server_msg_id": string(message.Info.ID),
+		"ts":            ts,
+	}
+	c.emit(EventMessageReceived, payload, traceData)
 }
 
 func (c *Client) handleReceipt(receipt *events.Receipt) {
@@ -454,7 +711,221 @@ func (c *Client) emit(eventType string, payload any, traceData any) {
 			})
 		}
 	}()
-	c.callback(eventType, payloadJSON)
+	c.callback.OnEvent(eventType, payloadJSON)
+}
+
+func (c *Client) freshLinkRemainingLocked(delay time.Duration) time.Duration {
+	if c.freshLinkedAt.IsZero() {
+		return 0
+	}
+	until := c.freshLinkedAt.Add(delay)
+	if remaining := time.Until(until); remaining > 0 {
+		return remaining
+	}
+	return 0
+}
+
+func (c *Client) activeOperationRemainingLocked() time.Duration {
+	if c.nextActiveAt.IsZero() {
+		return 0
+	}
+	if remaining := time.Until(c.nextActiveAt); remaining > 0 {
+		return remaining
+	}
+	return 0
+}
+
+func (c *Client) reserveActiveOperationLocked() {
+	c.nextActiveAt = time.Now().Add(activeOperationMinInterval)
+}
+
+func (c *Client) riskRemainingLocked() time.Duration {
+	if c.riskUntil.IsZero() {
+		return 0
+	}
+	if remaining := time.Until(c.riskUntil); remaining > 0 {
+		return remaining
+	}
+	return 0
+}
+
+func (c *Client) markFreshLinkedDevice(at time.Time) error {
+	c.mu.Lock()
+	c.freshLinkedAt = at
+	c.mu.Unlock()
+	return os.WriteFile(c.freshLinkMarkerPath(), []byte(at.UTC().Format(time.RFC3339Nano)), 0o600)
+}
+
+func (c *Client) readFreshLinkedAt() time.Time {
+	b, err := os.ReadFile(c.freshLinkMarkerPath())
+	if err != nil {
+		return time.Time{}
+	}
+	at, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(b)))
+	if err != nil {
+		return time.Time{}
+	}
+	return at
+}
+
+func (c *Client) freshLinkMarkerPath() string {
+	return filepath.Join(c.dataDir, freshLinkMarkerFile)
+}
+
+func (c *Client) enterRiskStopIfNeeded(where string, err error) {
+	if err == nil {
+		return
+	}
+	if duration := riskStopDuration(err.Error()); duration > 0 {
+		c.enterRiskStop(where, err.Error(), duration)
+	}
+}
+
+func (c *Client) enterRiskStop(where string, reason string, duration time.Duration) {
+	until := time.Now().Add(duration)
+	safeReason := sanitizeTraceString(reason)
+
+	c.mu.Lock()
+	if !c.riskUntil.IsZero() && c.riskUntil.After(until) {
+		until = c.riskUntil
+	}
+	c.riskUntil = until
+	c.riskReason = safeReason
+	cancel := c.cancel
+	adapter := c.wa
+	c.state = StateDisconnected
+	c.mu.Unlock()
+
+	_ = c.writeRiskStop(until, safeReason)
+	if cancel != nil {
+		cancel()
+	}
+	if adapter != nil {
+		adapter.Disconnect()
+	}
+	payload := map[string]any{
+		"where":               where,
+		"reason":              safeReason,
+		"retry_after_seconds": int(time.Until(until).Seconds()),
+	}
+	c.emit(EventRiskStopped, payload, payload)
+}
+
+func riskStopDuration(message string) time.Duration {
+	lower := strings.ToLower(message)
+	switch {
+	case strings.Contains(lower, "463"),
+		strings.Contains(lower, "temporary ban"),
+		strings.Contains(lower, "temporarily banned"),
+		strings.Contains(lower, "temp banned"):
+		return riskStopDelay
+	case strings.Contains(lower, "rate-overlimit"),
+		strings.Contains(lower, "rate limited"),
+		strings.Contains(lower, "rate limit"),
+		strings.Contains(lower, "429"):
+		return rateLimitStopDelay
+	default:
+		return 0
+	}
+}
+
+func (c *Client) readRiskStop() (time.Time, string) {
+	b, err := os.ReadFile(c.riskMarkerPath())
+	if err != nil {
+		return time.Time{}, ""
+	}
+	var persisted persistedRiskStop
+	if err := json.Unmarshal(b, &persisted); err != nil {
+		return time.Time{}, ""
+	}
+	until, err := time.Parse(time.RFC3339Nano, persisted.Until)
+	if err != nil || time.Until(until) <= 0 {
+		return time.Time{}, ""
+	}
+	return until, persisted.Reason
+}
+
+func (c *Client) writeRiskStop(until time.Time, reason string) error {
+	b, err := json.Marshal(persistedRiskStop{
+		Until:  until.UTC().Format(time.RFC3339Nano),
+		Reason: reason,
+	})
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(c.riskMarkerPath(), b, 0o600)
+}
+
+func (c *Client) riskMarkerPath() string {
+	return filepath.Join(c.dataDir, riskMarkerFile)
+}
+
+func (c *Client) safetyStatus() map[string]any {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	status := map[string]any{
+		"state":                              c.state,
+		"risk_stopped":                       false,
+		"risk_retry_after_seconds":           0,
+		"fresh_contacts_retry_after_seconds": 0,
+		"fresh_send_retry_after_seconds":     0,
+		"operation_retry_after_seconds":      0,
+	}
+	if remaining := c.riskRemainingLocked(); remaining > 0 {
+		status["risk_stopped"] = true
+		status["risk_reason"] = c.riskReason
+		status["risk_retry_after_seconds"] = int(remaining.Seconds())
+	}
+	if remaining := c.freshLinkRemainingLocked(freshLinkContactDelay); remaining > 0 {
+		status["fresh_contacts_retry_after_seconds"] = int(remaining.Seconds())
+	}
+	if remaining := c.freshLinkRemainingLocked(freshLinkSendDelay); remaining > 0 {
+		status["fresh_send_retry_after_seconds"] = int(remaining.Seconds())
+	}
+	if remaining := c.activeOperationRemainingLocked(); remaining > 0 {
+		status["operation_retry_after_seconds"] = int(remaining.Seconds())
+	}
+	return status
+}
+
+func freshLinkCooldownError(action string, remaining time.Duration) error {
+	remaining = remaining.Round(time.Second)
+	if remaining < time.Second {
+		remaining = time.Second
+	}
+	return fmt.Errorf("fresh linked device cooldown: wait %s before %s", remaining, action)
+}
+
+func activeOperationCooldownError(action string, remaining time.Duration) error {
+	remaining = remaining.Round(time.Second)
+	if remaining < time.Second {
+		remaining = time.Second
+	}
+	return fmt.Errorf("operation backoff: wait %s before %s", remaining, action)
+}
+
+func riskStoppedError(reason string, remaining time.Duration) error {
+	remaining = remaining.Round(time.Second)
+	if remaining < time.Second {
+		remaining = time.Second
+	}
+	if reason == "" {
+		reason = "risk stop is active"
+	}
+	return fmt.Errorf("risk stop active: %s; retry after %s", reason, remaining)
+}
+
+func plainTextFromMessage(message *events.Message) string {
+	if message == nil || message.Message == nil {
+		return ""
+	}
+	if text := message.Message.GetConversation(); text != "" {
+		return text
+	}
+	if extended := message.Message.GetExtendedTextMessage(); extended != nil {
+		return extended.GetText()
+	}
+	return ""
 }
 
 func (c *Client) emitError(where string, message string) {
@@ -467,11 +938,16 @@ func (c *Client) emitError(where string, message string) {
 	})
 }
 
-func (c *Client) emitMessageFailed(clientMsgId string, errorCode string, message string) {
+func (c *Client) emitMessageFailed(clientMsgId string, errorCode string, message string, extras ...map[string]any) {
 	payload := map[string]any{
 		"clientMsgId": clientMsgId,
 		"error_code":  errorCode,
 		"error":       message,
+	}
+	for _, extra := range extras {
+		for key, value := range extra {
+			payload[key] = value
+		}
 	}
 	c.emit(EventMessageFailed, payload, payload)
 }
@@ -539,6 +1015,27 @@ func maskedPhone(phone string) string {
 		return "..." + phone
 	}
 	return "..." + phone[len(phone)-4:]
+}
+
+func recipientSuffix(recipient string) string {
+	if strings.Contains(recipient, "@") {
+		return jidSuffix(recipient)
+	}
+	return maskedPhone(normalizePhone(recipient))
+}
+
+func sendRoutePayload(result sendTextResult) map[string]any {
+	payload := make(map[string]any)
+	if result.RecipientJID != "" {
+		payload["recipient_suffix"] = jidSuffix(result.RecipientJID)
+	}
+	if result.RecipientServer != "" {
+		payload["recipient_server"] = result.RecipientServer
+	}
+	if result.RecipientJID != "" || result.RecipientServer != "" {
+		payload["used_lid"] = result.UsedLID
+	}
+	return payload
 }
 
 func sanitizeError(message string, sensitive ...string) string {

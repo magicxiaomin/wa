@@ -3,3 +3,9 @@
 .gopath/
 wa-session/
 trace.json
+android/.gradle/
+android/.kotlin/
+android/app/build/
+android/build/
+outputs/
+*.log

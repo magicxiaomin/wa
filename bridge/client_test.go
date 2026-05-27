@@ -3,19 +3,25 @@ package bridge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/types"
+	waevents "go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestStartAndConnectMountHandlersAndQRBeforeNetworkConnect(t *testing.T) {
-	events := newEventRecorder()
+	eventsRec := newEventRecorder()
 	fake := newFakeWAAdapter()
 
-	c, err := NewClient(events.callback, t.TempDir(), "wa-test-device")
+	c, err := NewClient(eventsRec, t.TempDir(), "wa-test-device")
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
@@ -26,8 +32,8 @@ func TestStartAndConnectMountHandlersAndQRBeforeNetworkConnect(t *testing.T) {
 	if err := c.Start(); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	if !events.seen("bridge_started") {
-		t.Fatalf("Start() did not emit bridge_started; events=%v", events.types())
+	if !eventsRec.seen("bridge_started") {
+		t.Fatalf("Start() did not emit bridge_started; events=%v", eventsRec.types())
 	}
 
 	if err := c.Connect(); err != nil {
@@ -42,7 +48,7 @@ func TestStartAndConnectMountHandlersAndQRBeforeNetworkConnect(t *testing.T) {
 	const qrCode = "2@test-qr-code"
 	fake.qr <- qrItem{Event: "code", Code: qrCode}
 
-	got := events.waitFor(t, "qr_generated")
+	got := eventsRec.waitFor(t, "qr_generated")
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(got.payload), &payload); err != nil {
 		t.Fatalf("qr payload is not JSON: %v", err)
@@ -60,7 +66,7 @@ func TestConnectRecoversPanicAsErrorEvent(t *testing.T) {
 	fake := newFakeWAAdapter()
 	fake.panicOnConnect = true
 
-	c, err := NewClient(events.callback, t.TempDir(), "wa-test-device")
+	c, err := NewClient(events, t.TempDir(), "wa-test-device")
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
@@ -79,11 +85,46 @@ func TestConnectRecoversPanicAsErrorEvent(t *testing.T) {
 	}
 }
 
+func TestManualLoginReconnectReconnectsAfterPair(t *testing.T) {
+	oldDelay := manualLoginReconnectDelay
+	manualLoginReconnectDelay = 0
+	defer func() { manualLoginReconnectDelay = oldDelay }()
+
+	eventsRec := newEventRecorder()
+	fake := newFakeWAAdapter()
+
+	c, err := NewClient(eventsRec, t.TempDir(), "wa-test-device")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	c.newWA = func(context.Context, string, string) (waAdapter, bool, error) {
+		return fake, false, nil
+	}
+	if err := c.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	fake.handler(&waevents.ManualLoginReconnect{})
+	eventsRec.waitFor(t, EventManualReconnect)
+	deadline := time.After(2 * time.Second)
+	for {
+		if fake.reconnectCalls > 0 {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("manual login reconnect did not reach adapter; calls=%v", fake.calls)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
 func TestStartInitializesModerncSQLiteSessionStore(t *testing.T) {
 	events := newEventRecorder()
 	dataDir := t.TempDir()
 
-	c, err := NewClient(events.callback, dataDir, "wa-test-device")
+	c, err := NewClient(events, dataDir, "wa-test-device")
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
@@ -120,7 +161,7 @@ func TestSendTextForTestEmitsSentEventsAndRedactedTrace(t *testing.T) {
 		RecipientJID:    "15551234567@s.whatsapp.net",
 	}
 
-	c, err := NewClient(events.callback, t.TempDir(), "wa-test-device")
+	c, err := NewClient(events, t.TempDir(), "wa-test-device")
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
@@ -166,10 +207,48 @@ func TestSendTextForTestEmitsSentEventsAndRedactedTrace(t *testing.T) {
 	}
 }
 
+func TestSendTextTimeoutEmitsFailedWithoutRiskStop(t *testing.T) {
+	oldTimeout := sendTextTimeout
+	oldInterval := activeOperationMinInterval
+	sendTextTimeout = 10 * time.Millisecond
+	activeOperationMinInterval = 0
+	defer func() {
+		sendTextTimeout = oldTimeout
+		activeOperationMinInterval = oldInterval
+	}()
+
+	events := newEventRecorder()
+	fake := newFakeWAAdapter()
+	fake.waitForSendContext = true
+
+	c, err := NewClient(events, t.TempDir(), "wa-test-device")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	c.newWA = func(context.Context, string, string) (waAdapter, bool, error) {
+		return fake, true, nil
+	}
+	if err := c.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	c.setState(StateConnected)
+
+	if err := c.SendText("15551234567@s.whatsapp.net", "hello", "client-timeout"); err == nil {
+		t.Fatal("SendText() error = nil, want timeout")
+	}
+	got := events.waitFor(t, EventMessageFailed)
+	if !strings.Contains(got.payload, `"error_code":"send_timeout"`) {
+		t.Fatalf("message_failed missing send_timeout: %s", got.payload)
+	}
+	if events.seen(EventRiskStopped) {
+		t.Fatalf("send timeout should not enter risk stop; events=%v", events.types())
+	}
+}
+
 func TestSendTextForTestRejectsNonWhitelistedRecipient(t *testing.T) {
 	events := newEventRecorder()
 	fake := newFakeWAAdapter()
-	c, err := NewClient(events.callback, t.TempDir(), "wa-test-device")
+	c, err := NewClient(events, t.TempDir(), "wa-test-device")
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
@@ -193,11 +272,15 @@ func TestSendTextForTestRejectsNonWhitelistedRecipient(t *testing.T) {
 }
 
 func TestSendTextForTestRejectsAfterSendLimit(t *testing.T) {
+	oldInterval := activeOperationMinInterval
+	activeOperationMinInterval = 0
+	defer func() { activeOperationMinInterval = oldInterval }()
+
 	events := newEventRecorder()
 	fake := newFakeWAAdapter()
 	fake.sendResult = sendTextResult{ServerMessageID: "3EB0OK", RecipientJID: "15551234567@s.whatsapp.net"}
 
-	c, err := NewClient(events.callback, t.TempDir(), "wa-test-device")
+	c, err := NewClient(events, t.TempDir(), "wa-test-device")
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
@@ -222,6 +305,212 @@ func TestSendTextForTestRejectsAfterSendLimit(t *testing.T) {
 	}
 }
 
+func TestGetContactsReturnsJSON(t *testing.T) {
+	events := newEventRecorder()
+	fake := newFakeWAAdapter()
+
+	c, err := NewClient(events, t.TempDir(), "wa-test-device")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	c.newWA = func(context.Context, string, string) (waAdapter, bool, error) {
+		return fake, true, nil
+	}
+	if err := c.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	c.setState(StateConnected)
+
+	got, err := c.GetContacts()
+	if err != nil {
+		t.Fatalf("GetContacts() error = %v", err)
+	}
+	if !strings.Contains(got, `"jid":"15551234567@s.whatsapp.net"`) {
+		t.Fatalf("GetContacts() missing contact JID: %s", got)
+	}
+}
+
+func TestFreshLinkedDeviceCooldownBlocksContactsAndSend(t *testing.T) {
+	events := newEventRecorder()
+	fake := newFakeWAAdapter()
+
+	c, err := NewClient(events, t.TempDir(), "wa-test-device")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	c.newWA = func(context.Context, string, string) (waAdapter, bool, error) {
+		return fake, false, nil
+	}
+	if err := c.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	c.setState(StateConnected)
+	if err := c.markFreshLinkedDevice(time.Now()); err != nil {
+		t.Fatalf("markFreshLinkedDevice() error = %v", err)
+	}
+
+	if _, err := c.GetContacts(); err == nil || !strings.Contains(err.Error(), "fresh linked device cooldown") {
+		t.Fatalf("GetContacts() error = %v, want fresh link cooldown", err)
+	}
+	if err := c.SendText("15551234567@s.whatsapp.net", "hello", "client-cooldown"); err == nil {
+		t.Fatal("SendText() error = nil, want fresh link cooldown")
+	}
+	if fake.sendCalls != 0 {
+		t.Fatalf("fresh cooldown send reached adapter %d times", fake.sendCalls)
+	}
+	got := events.waitFor(t, EventMessageFailed)
+	if !strings.Contains(got.payload, `"error_code":"fresh_link_cooldown"`) {
+		t.Fatalf("message_failed missing fresh_link_cooldown: %s", got.payload)
+	}
+}
+
+func TestRiskStopBlocksConnectAndActiveOperations(t *testing.T) {
+	events := newEventRecorder()
+	fake := newFakeWAAdapter()
+	fake.sendErr = errors.New("server returned error 463")
+
+	c, err := NewClient(events, t.TempDir(), "wa-test-device")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	c.newWA = func(context.Context, string, string) (waAdapter, bool, error) {
+		return fake, true, nil
+	}
+	if err := c.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	c.setState(StateConnected)
+
+	if err := c.SendText("15551234567@s.whatsapp.net", "hello", "client-risk"); err == nil {
+		t.Fatal("SendText() error = nil, want server error")
+	}
+	events.waitFor(t, EventMessageFailed)
+	got := events.waitFor(t, EventRiskStopped)
+	if !strings.Contains(got.payload, `"where":"sendText"`) {
+		t.Fatalf("risk_stopped payload missing where=sendText: %s", got.payload)
+	}
+	if !fake.disconnected {
+		t.Fatal("risk stop did not disconnect adapter")
+	}
+	if err := c.Connect(); err == nil || !strings.Contains(err.Error(), "risk stop active") {
+		t.Fatalf("Connect() error = %v, want risk stop", err)
+	}
+}
+
+func TestActiveOperationBackoffBlocksRapidCalls(t *testing.T) {
+	oldInterval := activeOperationMinInterval
+	activeOperationMinInterval = time.Minute
+	defer func() { activeOperationMinInterval = oldInterval }()
+
+	events := newEventRecorder()
+	fake := newFakeWAAdapter()
+
+	c, err := NewClient(events, t.TempDir(), "wa-test-device")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	c.newWA = func(context.Context, string, string) (waAdapter, bool, error) {
+		return fake, true, nil
+	}
+	if err := c.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	c.setState(StateConnected)
+
+	if _, err := c.GetContacts(); err != nil {
+		t.Fatalf("GetContacts() error = %v", err)
+	}
+	if err := c.SendText("15551234567@s.whatsapp.net", "hello", "client-backoff"); err == nil {
+		t.Fatal("SendText() error = nil, want operation backoff")
+	}
+	got := events.waitFor(t, EventMessageFailed)
+	if !strings.Contains(got.payload, `"error_code":"operation_backoff"`) {
+		t.Fatalf("message_failed missing operation_backoff: %s", got.payload)
+	}
+	if fake.sendCalls != 0 {
+		t.Fatalf("operation backoff send reached adapter %d times", fake.sendCalls)
+	}
+}
+
+func TestIncomingOneToOneTextEmitsPayloadButTraceIsRedacted(t *testing.T) {
+	eventsRec := newEventRecorder()
+	fake := newFakeWAAdapter()
+
+	c, err := NewClient(eventsRec, t.TempDir(), "wa-test-device")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	c.newWA = func(context.Context, string, string) (waAdapter, bool, error) {
+		return fake, true, nil
+	}
+	if err := c.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	fake.handler(&waevents.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Chat:   types.NewJID("15551234567", types.DefaultUserServer),
+				Sender: types.NewJID("15551234567", types.DefaultUserServer),
+			},
+			ID:        "incoming-1",
+			Timestamp: time.Now(),
+		},
+		Message: &waE2E.Message{Conversation: proto.String("visible only in realtime callback")},
+	})
+
+	got := eventsRec.waitFor(t, EventMessageReceived)
+	if !strings.Contains(got.payload, "visible only in realtime callback") {
+		t.Fatalf("message_received callback payload missing text: %s", got.payload)
+	}
+
+	tracePath := filepath.Join(t.TempDir(), "trace.json")
+	if err := c.ExportTrace(tracePath); err != nil {
+		t.Fatalf("ExportTrace() error = %v", err)
+	}
+	traceBytes, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("ReadFile(trace) error = %v", err)
+	}
+	trace := string(traceBytes)
+	if strings.Contains(trace, "visible only in realtime callback") || strings.Contains(trace, "15551234567") {
+		t.Fatalf("trace leaked received message details: %s", trace)
+	}
+}
+
+func TestIncomingLIDOneToOneTextEmitsPayload(t *testing.T) {
+	eventsRec := newEventRecorder()
+	fake := newFakeWAAdapter()
+
+	c, err := NewClient(eventsRec, t.TempDir(), "wa-test-device")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	c.newWA = func(context.Context, string, string) (waAdapter, bool, error) {
+		return fake, true, nil
+	}
+	if err := c.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	fake.handler(&waevents.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Chat:   types.NewJID("241820349030637", types.HiddenUserServer),
+				Sender: types.NewJID("241820349030637", types.HiddenUserServer),
+			},
+			ID:        "incoming-lid-1",
+			Timestamp: time.Now(),
+		},
+		Message: &waE2E.Message{Conversation: proto.String("hello from lid")},
+	})
+
+	got := eventsRec.waitFor(t, EventMessageReceived)
+	if !strings.Contains(got.payload, `"from_jid":"241820349030637@lid"`) {
+		t.Fatalf("message_received callback payload missing LID sender: %s", got.payload)
+	}
+}
+
 type recordedEvent struct {
 	eventType string
 	payload   string
@@ -237,7 +526,7 @@ func newEventRecorder() *eventRecorder {
 	return &eventRecorder{ch: make(chan recordedEvent, 16)}
 }
 
-func (r *eventRecorder) callback(eventType string, payloadJSON string) {
+func (r *eventRecorder) OnEvent(eventType string, payloadJSON string) {
 	ev := recordedEvent{eventType: eventType, payload: payloadJSON}
 	r.mu.Lock()
 	r.events = append(r.events, ev)
@@ -282,12 +571,16 @@ func (r *eventRecorder) waitFor(t *testing.T, eventType string) recordedEvent {
 }
 
 type fakeWAAdapter struct {
-	calls          []string
-	qr             chan qrItem
-	handler        func(any)
-	panicOnConnect bool
-	sendCalls      int
-	sendResult     sendTextResult
+	calls              []string
+	qr                 chan qrItem
+	handler            func(any)
+	panicOnConnect     bool
+	sendCalls          int
+	sendResult         sendTextResult
+	sendErr            error
+	waitForSendContext bool
+	reconnectCalls     int
+	disconnected       bool
 }
 
 func newFakeWAAdapter() *fakeWAAdapter {
@@ -313,13 +606,31 @@ func (f *fakeWAAdapter) ConnectContext(context.Context) error {
 	return nil
 }
 
-func (f *fakeWAAdapter) Disconnect() {}
+func (f *fakeWAAdapter) ReconnectAfterLogin(context.Context) error {
+	f.calls = append(f.calls, "reconnect_after_login")
+	f.reconnectCalls++
+	return nil
+}
+
+func (f *fakeWAAdapter) Disconnect() { f.disconnected = true }
 
 func (f *fakeWAAdapter) Close() error { return nil }
 
 func (f *fakeWAAdapter) UserIDString() string { return "" }
 
-func (f *fakeWAAdapter) SendText(context.Context, string, string, string) (sendTextResult, error) {
+func (f *fakeWAAdapter) SendText(ctx context.Context, phone string, text string, clientMsgId string) (sendTextResult, error) {
 	f.sendCalls++
-	return f.sendResult, nil
+	if f.waitForSendContext {
+		<-ctx.Done()
+		return f.sendResult, ctx.Err()
+	}
+	return f.sendResult, f.sendErr
+}
+
+func (f *fakeWAAdapter) GetContacts(context.Context) ([]contactInfo, error) {
+	return []contactInfo{{JID: "15551234567@s.whatsapp.net", Name: "Test Contact"}}, nil
+}
+
+func (f *fakeWAAdapter) ResolveJID(context.Context, string) (string, error) {
+	return "15551234567@s.whatsapp.net", nil
 }

@@ -12,6 +12,12 @@ import (
 	"github.com/magicxiaomin/wa/bridge"
 )
 
+type eventCallbackFunc func(eventType string, payloadJSON string)
+
+func (f eventCallbackFunc) OnEvent(eventType string, payloadJSON string) {
+	f(eventType, payloadJSON)
+}
+
 func main() {
 	dataDir := flag.String("data-dir", "./wa-session", "local directory for whatsmeow session store")
 	deviceName := flag.String("device-name", "wa-desktop-poc", "device name shown in WhatsApp linked devices")
@@ -21,7 +27,7 @@ func main() {
 	flag.Parse()
 
 	events := make(chan string, 16)
-	client, err := bridge.NewClient(func(eventType string, payloadJSON string) {
+	client, err := bridge.NewClient(eventCallbackFunc(func(eventType string, payloadJSON string) {
 		fmt.Printf("%s %s\n", eventType, payloadJSON)
 		select {
 		case events <- eventType:
@@ -37,7 +43,7 @@ func main() {
 				}
 			}
 		}
-	}, *dataDir, *deviceName)
+	}), *dataDir, *deviceName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "new client: %v\n", err)
 		os.Exit(1)

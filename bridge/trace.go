@@ -85,6 +85,9 @@ func sanitizeTraceData(eventType string, data any) any {
 		allow("clientMsgId")
 		allow("server_msg_id")
 		allow("latency_ms")
+		allow("recipient_suffix")
+		allow("recipient_server")
+		allow("used_lid")
 	case EventMessageAck:
 		allow("server_msg_id")
 		allow("ack_level")
@@ -93,6 +96,22 @@ func sanitizeTraceData(eventType string, data any) any {
 		allow("clientMsgId")
 		allow("error_code")
 		allow("error")
+		allow("recipient_suffix")
+		allow("recipient_server")
+		allow("used_lid")
+	case EventMessageReceived:
+		allow("from_suffix")
+		allow("text_len")
+		allow("server_msg_id")
+		allow("ts")
+	case EventContactsSynced:
+		return map[string]any{}
+	case EventManualReconnect:
+		return map[string]any{}
+	case EventRiskStopped:
+		allow("where")
+		allow("reason")
+		allow("retry_after_seconds")
 	case EventDisconnected:
 		allow("reason")
 		allow("will_reconnect")

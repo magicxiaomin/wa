@@ -2,6 +2,48 @@
 
 按 Phase 分组，每个 Phase 的门都通过才进下一个。
 
+## 2026-05-27 Android 真机实测记录
+
+设备：Android 真机 `N0WR2G0009`
+
+账号：`18205924392`，连接后 UI 显示 `jid_suffix: ...4392`
+
+构建工具链：
+- AAR 使用 Go `1.26.3` + gomobile 重编。
+- sqlite 驱动使用 `modernc.org/sqlite` 纯 Go 驱动。
+- Go `1.25.0` 构建的 AAR 曾在发送时触发 `fatal error: bulkBarrierPreWrite: unaligned arguments`，已通过 Go `1.26.3` 重编规避。
+
+已通过：
+- AAR 编译、Android 工程编译、真机加载 `.so`。
+- `:wa_bridge` 独立进程 + ForegroundService 启动。
+- session 恢复成功，无需重新扫码，UI 显示 `connected {"jid_suffix":"...4392"}`。
+- GetContacts 成功，UI 显示 `Contacts: 29`。
+- 联系人列表默认显示多行并可滚动。
+- 选择 `Robert 2 / 85255804693@s.whatsapp.net` 后发送 1 对 1 文本成功。
+- 发送结果：`SENT c25ad4ee 3EB00D2071B5DCCAF9B62F`。
+- 收到发送 ACK：`ack_level=1`，延迟约 `4151ms`。
+- 对方回复实时显示成功：`message_received`，正文 `收到`，底部 UI 显示 `IN ...9165: 收到`。
+- Disconnect 真机验证通过，UI 显示 `disconnected {"reason":"manual_disconnect","will_reconnect":false}`，服务进程未崩溃。
+- Export Trace 真机验证通过，生成 `/data/user/0/com.magicxiaomin.wa/files/wa-trace.json`，已确认连接/断开事件脱敏，不含 session key、消息正文、完整号码。
+- 同一进程内 lifecycle trace 已覆盖连接/session 恢复/断开/重连/发送/ACK：
+  `message_send_start -> message_sent -> message_ack`，发送正文 `trace_test_1030` 未进入 trace，目标号码未完整进入 trace。
+- 本轮 trace 发送结果：`SENT b6f1d6e6 3EB076ED716F6A0D9707DA`，ACK `ack_level=1`，延迟约 `2677ms`。
+- 联系人 UI 去重已修复并真机验证：后端返回中 `Robert 2` 曾重复显示导致 `Contacts: 30`；安装去重修复后 UI 回到 `Contacts: 29`，`Robert 2` 只显示一次。
+- 后台 5 分钟短测通过：主进程与 `:wa_bridge` 均存活，`BridgeForegroundService` 仍为 foreground service，`isForeground=true`，通知 ongoing，未见 bridge 崩溃/断连日志。
+- 锁屏 2 分钟短测通过：主进程与 `:wa_bridge` 均存活，未见 bridge 崩溃/断连日志。
+- 同一进程内 `message_received` trace 补齐完成：收到新消息正文 `测试`，UI 实时显示；导出的 trace 包含 `message_received`，仅记录 `from_suffix`、`server_msg_id`、`text_len`、`ts`，未记录正文和完整号码。
+- 当前未生成 `risk-stop.json`。
+
+未完成 / 暂未执行：
+- 同一进程内 trace 的收消息脱敏已补齐；若需要“连接 + 发 + 收 + 断开”严格全部位于同一份 trace，需要再跑一次包含全部动作的完整脚本化回归。
+- Go 普通 panic recover 已有单元测试覆盖；Go runtime fatal 无法 recover，本次通过升级 Go 工具链规避。
+- ClearSession 后重新扫码登录尚未在 Go `1.26.3` AAR 上重跑。该项会破坏当前 session，需要单独确认后执行。
+- 后台/锁屏已做短测；10/30/60 分钟长期保活、后台/锁屏状态下实时收消息仍未专项验证。
+
+当前判定：
+- 第二波核心功能链路已通过：`扫码/恢复 session → 看到联系人 → 给指定联系人发消息他收到 → 他回复我看到`。
+- Phase F 还剩 ClearSession 重扫回归、严格单文件全动作 lifecycle trace 回归、长期保活专项。
+
 ## Phase A（桌面扩展 wrapper）
 - [ ] 桌面 wrapper 新增 GetContacts()，能返回联系人 JSON 列表
 - [ ] 桌面能接收到别人发来的 1 对 1 文本消息（message_received 事件含发送方+正文）
