@@ -146,6 +146,56 @@ func TestStartInitializesModerncSQLiteSessionStore(t *testing.T) {
 	}
 }
 
+func TestClearSessionResetsClientState(t *testing.T) {
+	events := newEventRecorder()
+	fake := newFakeWAAdapter()
+	dataDir := t.TempDir()
+
+	c, err := NewClient(events, dataDir, "wa-test-device")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	c.newWA = func(context.Context, string, string) (waAdapter, bool, error) {
+		return fake, true, nil
+	}
+	if err := c.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	c.setState(StateConnected)
+	c.mu.Lock()
+	c.sentAt["server-1"] = time.Now()
+	c.freshLinkedAt = time.Now()
+	c.riskUntil = time.Now().Add(time.Hour)
+	c.riskReason = "test"
+	c.nextActiveAt = time.Now().Add(time.Minute)
+	c.mu.Unlock()
+
+	if err := c.ClearSession(); err != nil {
+		t.Fatalf("ClearSession() error = %v", err)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.wa != nil || c.started || c.hadSession || c.cancel != nil {
+		t.Fatalf("client state not reset: wa=%v started=%v hadSession=%v cancelNil=%v", c.wa, c.started, c.hadSession, c.cancel == nil)
+	}
+	if len(c.sentAt) != 0 {
+		t.Fatalf("sentAt len = %d, want 0", len(c.sentAt))
+	}
+	if !c.freshLinkedAt.IsZero() || !c.riskUntil.IsZero() || c.riskReason != "" || !c.nextActiveAt.IsZero() {
+		t.Fatalf("safety state not reset: fresh=%v risk=%v reason=%q next=%v", c.freshLinkedAt, c.riskUntil, c.riskReason, c.nextActiveAt)
+	}
+	if c.state != StateDisconnected {
+		t.Fatalf("state = %q, want %q", c.state, StateDisconnected)
+	}
+	if !fake.disconnected || !fake.closed {
+		t.Fatalf("adapter cleanup incomplete: disconnected=%v closed=%v", fake.disconnected, fake.closed)
+	}
+	if _, err := os.Stat(dataDir); !os.IsNotExist(err) {
+		t.Fatalf("session data dir still exists or unexpected stat error: %v", err)
+	}
+}
+
 func TestJIDSuffixStripsDeviceIDBeforeMasking(t *testing.T) {
 	got := jidSuffix("1234567892:1@s.whatsapp.net")
 	if got != "...7892" {
@@ -581,6 +631,7 @@ type fakeWAAdapter struct {
 	waitForSendContext bool
 	reconnectCalls     int
 	disconnected       bool
+	closed             bool
 }
 
 func newFakeWAAdapter() *fakeWAAdapter {
@@ -614,7 +665,10 @@ func (f *fakeWAAdapter) ReconnectAfterLogin(context.Context) error {
 
 func (f *fakeWAAdapter) Disconnect() { f.disconnected = true }
 
-func (f *fakeWAAdapter) Close() error { return nil }
+func (f *fakeWAAdapter) Close() error {
+	f.closed = true
+	return nil
+}
 
 func (f *fakeWAAdapter) UserIDString() string { return "" }
 

@@ -479,6 +479,11 @@ func (c *Client) ClearSession() (err error) {
 		return err
 	}
 	c.mu.Lock()
+	c.wa = nil
+	c.started = false
+	c.hadSession = false
+	c.cancel = nil
+	c.sentAt = make(map[string]time.Time)
 	c.freshLinkedAt = time.Time{}
 	c.riskUntil = time.Time{}
 	c.riskReason = ""

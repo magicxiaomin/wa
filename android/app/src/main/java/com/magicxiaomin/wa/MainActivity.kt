@@ -155,7 +155,7 @@ class MainActivity : Activity() {
                 status.text = "Long press Clear Session to erase login"
             }
             setOnLongClickListener {
-                status.text = "Session cleared"
+                resetUiAfterSessionClear()
                 runBridgeCall { service?.clearSession() }
                 true
             }
@@ -327,6 +327,18 @@ class MainActivity : Activity() {
                 appendConversation("TRACE exported $path")
             }
         }
+    }
+
+    private fun resetUiAfterSessionClear() {
+        selectedJid = ""
+        pendingSends.clear()
+        contacts.adapter = null
+        conversation.text = ""
+        qrImage.setImageDrawable(null)
+        qrPayload.text = ""
+        messageInput.setText("")
+        status.text = "Session cleared"
+        updateSafetyControls()
     }
 
     private fun runBridgeCall(block: () -> Unit) {

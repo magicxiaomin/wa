@@ -68,7 +68,11 @@ class BridgeForegroundService : Service() {
         }
 
         override fun clearSession() {
-            call("clearSession") { ensureClient("WA-Android").clearSession() }
+            call("clearSession") {
+                val activeClient = client ?: ensureClient("WA-Android")
+                activeClient.clearSession()
+                client = null
+            }
         }
     }
 
