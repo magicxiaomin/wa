@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,7 +44,10 @@ const (
 	EventRiskStopped      = "risk_stopped"
 )
 
-const maxSendsPerRun = 5
+const (
+	maxSendsPerRun         = 5
+	maxMultiSendRecipients = 3
+)
 
 const (
 	freshLinkContactDelay = 2 * time.Minute
@@ -58,6 +62,8 @@ var (
 	rateLimitStopDelay         = 30 * time.Minute
 	riskStopDelay              = 24 * time.Hour
 	sendTextTimeout            = 45 * time.Second
+	multiSendSleep             = time.Sleep
+	multiSendDelay             = randomMultiSendDelay
 )
 
 var allowedTestNumbers = map[string]struct{}{
@@ -112,6 +118,15 @@ type sendTextResult struct {
 	RecipientJID    string
 	RecipientServer string
 	UsedLID         bool
+}
+
+type multiSendResult struct {
+	ClientMsgID     string `json:"clientMsgId"`
+	ToSuffix        string `json:"to_suffix"`
+	OK              bool   `json:"ok"`
+	ServerMessageID string `json:"server_msg_id,omitempty"`
+	ErrorCode       string `json:"error_code,omitempty"`
+	Error           string `json:"error,omitempty"`
 }
 
 type qrItem struct {
@@ -296,21 +311,83 @@ func (c *Client) SendText(to string, text string, clientMsgId string) (err error
 }
 
 func (c *Client) sendTextChecked(to string, text string, clientMsgId string) error {
+	_, _, err := c.sendTextCheckedResult(to, text, clientMsgId, false)
+	return err
+}
+
+func (c *Client) SendTextMulti(toJidsJSON string, text string, clientMsgId string) (resultsJSON string, err error) {
+	defer c.recoverAsError("SendTextMulti", &err)
+
+	var targets []string
+	if err := json.Unmarshal([]byte(toJidsJSON), &targets); err != nil {
+		err := fmt.Errorf("toJidsJson must be a JSON array: %w", err)
+		c.emitMessageFailed(clientMsgId, "invalid_request", err.Error())
+		return "", err
+	}
+	trimmed := make([]string, 0, len(targets))
+	for _, target := range targets {
+		target = strings.TrimSpace(target)
+		if target != "" {
+			trimmed = append(trimmed, target)
+		}
+	}
+	if len(trimmed) == 0 {
+		err := errors.New("at least one recipient is required")
+		c.emitMessageFailed(clientMsgId, "invalid_request", err.Error())
+		return "", err
+	}
+	if len(trimmed) > maxMultiSendRecipients {
+		err := fmt.Errorf("exceeds max %d recipients", maxMultiSendRecipients)
+		c.emitMessageFailed(clientMsgId, "too_many_recipients", err.Error())
+		return "", err
+	}
+
+	results := make([]multiSendResult, 0, len(trimmed))
+	for i, target := range trimmed {
+		childClientMsgID := multiSendClientMsgID(clientMsgId, i)
+		result, code, sendErr := c.sendTextCheckedResult(target, text, childClientMsgID, true)
+		item := multiSendResult{
+			ClientMsgID: childClientMsgID,
+			ToSuffix:    recipientSuffix(target),
+			OK:          sendErr == nil,
+		}
+		if sendErr == nil {
+			item.ServerMessageID = result.ServerMessageID
+		} else {
+			item.ErrorCode = code
+			item.Error = sendErr.Error()
+		}
+		results = append(results, item)
+		if i < len(trimmed)-1 {
+			if delay := multiSendDelay(); delay > 0 {
+				multiSendSleep(delay)
+			}
+		}
+	}
+
+	b, err := json.Marshal(results)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+func (c *Client) sendTextCheckedResult(to string, text string, clientMsgId string, skipActiveBackoff bool) (sendTextResult, string, error) {
 	target := strings.TrimSpace(to)
 	if clientMsgId == "" {
 		err := errors.New("clientMsgId is required")
 		c.emitMessageFailed(clientMsgId, "invalid_request", err.Error())
-		return err
+		return sendTextResult{}, "invalid_request", err
 	}
 	if strings.TrimSpace(text) == "" {
 		err := errors.New("text is required")
 		c.emitMessageFailed(clientMsgId, "invalid_request", err.Error())
-		return err
+		return sendTextResult{}, "invalid_request", err
 	}
 	if target == "" {
 		err := errors.New("recipient is required")
 		c.emitMessageFailed(clientMsgId, "invalid_request", err.Error())
-		return err
+		return sendTextResult{}, "invalid_request", err
 	}
 
 	c.mu.Lock()
@@ -319,31 +396,33 @@ func (c *Client) sendTextChecked(to string, text string, clientMsgId string) err
 		c.mu.Unlock()
 		err := riskStoppedError(reason, remaining)
 		c.emitMessageFailed(clientMsgId, "risk_stopped", err.Error())
-		return err
+		return sendTextResult{}, "risk_stopped", err
 	}
 	if c.sendCount >= maxSendsPerRun {
 		c.mu.Unlock()
 		err := fmt.Errorf("send limit exceeded: max %d messages per run", maxSendsPerRun)
 		c.emitMessageFailed(clientMsgId, "send_limit_exceeded", err.Error())
-		return err
+		return sendTextResult{}, "send_limit_exceeded", err
 	}
 	if remaining := c.freshLinkRemainingLocked(freshLinkSendDelay); remaining > 0 {
 		c.mu.Unlock()
 		err := freshLinkCooldownError("sending", remaining)
 		c.emitMessageFailed(clientMsgId, "fresh_link_cooldown", err.Error())
-		return err
+		return sendTextResult{}, "fresh_link_cooldown", err
 	}
-	if remaining := c.activeOperationRemainingLocked(); remaining > 0 {
-		c.mu.Unlock()
-		err := activeOperationCooldownError("sending", remaining)
-		c.emitMessageFailed(clientMsgId, "operation_backoff", err.Error())
-		return err
+	if !skipActiveBackoff {
+		if remaining := c.activeOperationRemainingLocked(); remaining > 0 {
+			c.mu.Unlock()
+			err := activeOperationCooldownError("sending", remaining)
+			c.emitMessageFailed(clientMsgId, "operation_backoff", err.Error())
+			return sendTextResult{}, "operation_backoff", err
+		}
 	}
 	if c.state != StateConnected {
 		c.mu.Unlock()
 		err := fmt.Errorf("client state is %q, want %q", c.state, StateConnected)
 		c.emitMessageFailed(clientMsgId, "not_connected", err.Error())
-		return err
+		return sendTextResult{}, "not_connected", err
 	}
 	adapter := c.wa
 	c.sendCount++
@@ -352,7 +431,7 @@ func (c *Client) sendTextChecked(to string, text string, clientMsgId string) err
 	if adapter == nil {
 		err := errors.New("whatsmeow adapter is not initialized")
 		c.emitMessageFailed(clientMsgId, "not_started", err.Error())
-		return err
+		return sendTextResult{}, "not_started", err
 	}
 
 	started := time.Now()
@@ -370,11 +449,11 @@ func (c *Client) sendTextChecked(to string, text string, clientMsgId string) err
 		message := sanitizeError(err.Error(), target, normalizePhone(target), text)
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			c.emitMessageFailed(clientMsgId, "send_timeout", message, sendRoutePayload(result))
-			return err
+			return result, "send_timeout", err
 		}
 		c.emitMessageFailed(clientMsgId, "send_failed", message, sendRoutePayload(result))
 		c.enterRiskStopIfNeeded("sendText", err)
-		return err
+		return result, "send_failed", err
 	}
 
 	latencyMS := time.Since(started).Milliseconds()
@@ -390,7 +469,24 @@ func (c *Client) sendTextChecked(to string, text string, clientMsgId string) err
 		payload[key] = value
 	}
 	c.emit(EventMessageSent, payload, payload)
-	return nil
+	return result, "", nil
+}
+
+func multiSendClientMsgID(clientMsgId string, index int) string {
+	return fmt.Sprintf("%s-%d", clientMsgId, index+1)
+}
+
+func randomMultiSendDelay() time.Duration {
+	min := activeOperationMinInterval
+	if min <= 0 {
+		return 0
+	}
+	max := min * 2
+	spread := int64(max - min)
+	if spread <= 0 {
+		return min
+	}
+	return min + time.Duration(rand.Int63n(spread+1))
 }
 
 func (c *Client) GetContacts() (contactsJSON string, err error) {

@@ -305,6 +305,155 @@ func TestSendTextForTestRejectsAfterSendLimit(t *testing.T) {
 	}
 }
 
+func TestSendTextMultiSendsTwoAndThreeRecipientsWithThrottle(t *testing.T) {
+	oldInterval := activeOperationMinInterval
+	oldDelay := multiSendDelay
+	oldSleep := multiSendSleep
+	activeOperationMinInterval = 0
+	defer func() {
+		activeOperationMinInterval = oldInterval
+		multiSendDelay = oldDelay
+		multiSendSleep = oldSleep
+	}()
+
+	for _, tc := range []struct {
+		name    string
+		targets []string
+	}{
+		{
+			name:    "two",
+			targets: []string{"15550000001@s.whatsapp.net", "15550000002@s.whatsapp.net"},
+		},
+		{
+			name:    "three",
+			targets: []string{"15550000001@s.whatsapp.net", "15550000002@s.whatsapp.net", "15550000003@s.whatsapp.net"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			delays := []time.Duration{}
+			multiSendDelay = func() time.Duration { return time.Second }
+			multiSendSleep = func(delay time.Duration) { delays = append(delays, delay) }
+
+			events := newEventRecorder()
+			fake := newFakeWAAdapter()
+			fake.sendResultsByTarget = map[string]sendTextResult{
+				"15550000001@s.whatsapp.net": {ServerMessageID: "server-1", RecipientJID: "15550000001@s.whatsapp.net"},
+				"15550000002@s.whatsapp.net": {ServerMessageID: "server-2", RecipientJID: "15550000002@s.whatsapp.net"},
+				"15550000003@s.whatsapp.net": {ServerMessageID: "server-3", RecipientJID: "15550000003@s.whatsapp.net"},
+			}
+			c := newStartedConnectedTestClient(t, events, fake)
+
+			payload, err := json.Marshal(tc.targets)
+			if err != nil {
+				t.Fatalf("Marshal() error = %v", err)
+			}
+			got, err := c.SendTextMulti(string(payload), "hello multi", "multi")
+			if err != nil {
+				t.Fatalf("SendTextMulti() error = %v", err)
+			}
+
+			var results []multiSendResult
+			if err := json.Unmarshal([]byte(got), &results); err != nil {
+				t.Fatalf("results JSON invalid: %v; %s", err, got)
+			}
+			if len(results) != len(tc.targets) {
+				t.Fatalf("results len = %d, want %d: %s", len(results), len(tc.targets), got)
+			}
+			if fake.sendCalls != len(tc.targets) {
+				t.Fatalf("send calls = %d, want %d", fake.sendCalls, len(tc.targets))
+			}
+			if len(delays) != len(tc.targets)-1 {
+				t.Fatalf("delay count = %d, want %d", len(delays), len(tc.targets)-1)
+			}
+			for i, result := range results {
+				if !result.OK {
+					t.Fatalf("result %d not ok: %#v", i, result)
+				}
+				if result.ServerMessageID == "" {
+					t.Fatalf("result %d missing server_msg_id: %#v", i, result)
+				}
+				if result.ClientMsgID != multiSendClientMsgID("multi", i) {
+					t.Fatalf("result %d clientMsgId = %q", i, result.ClientMsgID)
+				}
+			}
+		})
+	}
+}
+
+func TestSendTextMultiRejectsFourRecipientsWithoutSending(t *testing.T) {
+	events := newEventRecorder()
+	fake := newFakeWAAdapter()
+	c := newStartedConnectedTestClient(t, events, fake)
+
+	_, err := c.SendTextMulti(`[
+		"15550000001@s.whatsapp.net",
+		"15550000002@s.whatsapp.net",
+		"15550000003@s.whatsapp.net",
+		"15550000004@s.whatsapp.net"
+	]`, "hello", "multi-limit")
+	if err == nil || !strings.Contains(err.Error(), "exceeds max 3 recipients") {
+		t.Fatalf("SendTextMulti() error = %v, want max recipients error", err)
+	}
+	if fake.sendCalls != 0 {
+		t.Fatalf("over-limit SendTextMulti reached adapter %d times", fake.sendCalls)
+	}
+	got := events.waitFor(t, EventMessageFailed)
+	if !strings.Contains(got.payload, `"error_code":"too_many_recipients"`) {
+		t.Fatalf("message_failed missing too_many_recipients: %s", got.payload)
+	}
+}
+
+func TestSendTextMultiContinuesAfterSingleRecipientFailure(t *testing.T) {
+	oldInterval := activeOperationMinInterval
+	oldDelay := multiSendDelay
+	oldSleep := multiSendSleep
+	activeOperationMinInterval = 0
+	multiSendDelay = func() time.Duration { return 0 }
+	multiSendSleep = func(time.Duration) {}
+	defer func() {
+		activeOperationMinInterval = oldInterval
+		multiSendDelay = oldDelay
+		multiSendSleep = oldSleep
+	}()
+
+	events := newEventRecorder()
+	fake := newFakeWAAdapter()
+	fake.sendResultsByTarget = map[string]sendTextResult{
+		"15550000001@s.whatsapp.net": {ServerMessageID: "server-1", RecipientJID: "15550000001@s.whatsapp.net"},
+		"15550000003@s.whatsapp.net": {ServerMessageID: "server-3", RecipientJID: "15550000003@s.whatsapp.net"},
+	}
+	fake.sendErrorsByTarget = map[string]error{
+		"15550000002@s.whatsapp.net": errors.New("temporary recipient failure"),
+	}
+	c := newStartedConnectedTestClient(t, events, fake)
+
+	got, err := c.SendTextMulti(`[
+		"15550000001@s.whatsapp.net",
+		"15550000002@s.whatsapp.net",
+		"15550000003@s.whatsapp.net"
+	]`, "hello", "multi-partial")
+	if err != nil {
+		t.Fatalf("SendTextMulti() error = %v", err)
+	}
+	if fake.sendCalls != 3 {
+		t.Fatalf("send calls = %d, want 3", fake.sendCalls)
+	}
+
+	var results []multiSendResult
+	if err := json.Unmarshal([]byte(got), &results); err != nil {
+		t.Fatalf("results JSON invalid: %v; %s", err, got)
+	}
+	if len(results) != 3 {
+		t.Fatalf("results len = %d, want 3: %s", len(results), got)
+	}
+	if !results[0].OK || results[1].OK || !results[2].OK {
+		t.Fatalf("unexpected per-recipient status: %#v", results)
+	}
+	if results[1].ErrorCode != "send_failed" {
+		t.Fatalf("failed result error_code = %q, want send_failed", results[1].ErrorCode)
+	}
+}
+
 func TestGetContactsReturnsJSON(t *testing.T) {
 	events := newEventRecorder()
 	fake := newFakeWAAdapter()
@@ -526,6 +675,22 @@ func newEventRecorder() *eventRecorder {
 	return &eventRecorder{ch: make(chan recordedEvent, 16)}
 }
 
+func newStartedConnectedTestClient(t *testing.T, events *eventRecorder, fake *fakeWAAdapter) *Client {
+	t.Helper()
+	c, err := NewClient(events, t.TempDir(), "wa-test-device")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	c.newWA = func(context.Context, string, string) (waAdapter, bool, error) {
+		return fake, true, nil
+	}
+	if err := c.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	c.setState(StateConnected)
+	return c
+}
+
 func (r *eventRecorder) OnEvent(eventType string, payloadJSON string) {
 	ev := recordedEvent{eventType: eventType, payload: payloadJSON}
 	r.mu.Lock()
@@ -571,16 +736,19 @@ func (r *eventRecorder) waitFor(t *testing.T, eventType string) recordedEvent {
 }
 
 type fakeWAAdapter struct {
-	calls              []string
-	qr                 chan qrItem
-	handler            func(any)
-	panicOnConnect     bool
-	sendCalls          int
-	sendResult         sendTextResult
-	sendErr            error
-	waitForSendContext bool
-	reconnectCalls     int
-	disconnected       bool
+	calls               []string
+	qr                  chan qrItem
+	handler             func(any)
+	panicOnConnect      bool
+	sendCalls           int
+	sendTargets         []string
+	sendResult          sendTextResult
+	sendErr             error
+	sendResultsByTarget map[string]sendTextResult
+	sendErrorsByTarget  map[string]error
+	waitForSendContext  bool
+	reconnectCalls      int
+	disconnected        bool
 }
 
 func newFakeWAAdapter() *fakeWAAdapter {
@@ -620,9 +788,16 @@ func (f *fakeWAAdapter) UserIDString() string { return "" }
 
 func (f *fakeWAAdapter) SendText(ctx context.Context, phone string, text string, clientMsgId string) (sendTextResult, error) {
 	f.sendCalls++
+	f.sendTargets = append(f.sendTargets, phone)
 	if f.waitForSendContext {
 		<-ctx.Done()
 		return f.sendResult, ctx.Err()
+	}
+	if err, ok := f.sendErrorsByTarget[phone]; ok {
+		return f.sendResultsByTarget[phone], err
+	}
+	if result, ok := f.sendResultsByTarget[phone]; ok {
+		return result, nil
 	}
 	return f.sendResult, f.sendErr
 }
