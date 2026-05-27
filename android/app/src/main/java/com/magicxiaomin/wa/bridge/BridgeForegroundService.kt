@@ -123,7 +123,11 @@ class BridgeForegroundService : Service() {
         val count = callbacks.beginBroadcast()
         try {
             for (i in 0 until count) {
-                runCatching { callbacks.getBroadcastItem(i).onEvent(eventType, payloadJson) }
+                runCatching {
+                    callbacks.getBroadcastItem(i).onEvent(eventType, payloadJson)
+                }.onFailure {
+                    Log.w(TAG, "callback delivery failed: $eventType", it)
+                }
             }
         } finally {
             callbacks.finishBroadcast()
