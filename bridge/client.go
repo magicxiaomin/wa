@@ -683,19 +683,22 @@ func (c *Client) handleReceipt(receipt *events.Receipt) {
 		serverID := string(id)
 		c.mu.Lock()
 		started, ok := c.sentAt[serverID]
-		if ok {
-			delete(c.sentAt, serverID)
-		}
 		c.mu.Unlock()
 		if !ok {
 			continue
 		}
+		level := ackLevel(string(receipt.Type))
 		payload := map[string]any{
 			"server_msg_id": serverID,
-			"ack_level":     ackLevel(string(receipt.Type)),
+			"ack_level":     level,
 			"latency_ms":    time.Since(started).Milliseconds(),
 		}
 		c.emit(EventMessageAck, payload, payload)
+		if level >= 2 {
+			c.mu.Lock()
+			delete(c.sentAt, serverID)
+			c.mu.Unlock()
+		}
 	}
 }
 

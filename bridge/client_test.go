@@ -561,7 +561,7 @@ func TestIncomingLIDOneToOneTextEmitsPayload(t *testing.T) {
 	}
 }
 
-func TestReceiptDeletesSentAtEntry(t *testing.T) {
+func TestReceiptKeepsEntryUntilReadAck(t *testing.T) {
 	eventsRec := newEventRecorder()
 	c, err := NewClient(eventsRec, t.TempDir(), "wa-test-device")
 	if err != nil {
@@ -574,13 +574,34 @@ func TestReceiptDeletesSentAtEntry(t *testing.T) {
 
 	c.handleReceipt(&waevents.Receipt{
 		MessageIDs: []types.MessageID{types.MessageID("server-1")},
+		Type:       waevents.ReceiptTypeDelivered,
 	})
 
-	eventsRec.waitFor(t, EventMessageAck)
+	delivered := eventsRec.waitFor(t, EventMessageAck)
+	if !strings.Contains(delivered.payload, `"ack_level":1`) {
+		t.Fatalf("delivered ack payload missing ack_level=1: %s", delivered.payload)
+	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if _, ok := c.sentAt["server-1"]; ok {
-		t.Fatal("sentAt entry was not deleted after matching receipt")
+	_, ok := c.sentAt["server-1"]
+	c.mu.Unlock()
+	if !ok {
+		t.Fatal("sentAt entry was deleted before read ack")
+	}
+
+	c.handleReceipt(&waevents.Receipt{
+		MessageIDs: []types.MessageID{types.MessageID("server-1")},
+		Type:       waevents.ReceiptTypeRead,
+	})
+
+	read := eventsRec.waitFor(t, EventMessageAck)
+	if !strings.Contains(read.payload, `"ack_level":2`) {
+		t.Fatalf("read ack payload missing ack_level=2: %s", read.payload)
+	}
+	c.mu.Lock()
+	_, ok = c.sentAt["server-1"]
+	c.mu.Unlock()
+	if ok {
+		t.Fatal("sentAt entry was not deleted after read ack")
 	}
 }
 
