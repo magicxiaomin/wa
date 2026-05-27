@@ -483,6 +483,7 @@ func (c *Client) ClearSession() (err error) {
 	c.started = false
 	c.hadSession = false
 	c.cancel = nil
+	c.sendCount = 0
 	c.sentAt = make(map[string]time.Time)
 	c.freshLinkedAt = time.Time{}
 	c.riskUntil = time.Time{}
