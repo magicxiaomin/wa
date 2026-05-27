@@ -156,7 +156,7 @@ class MainActivity : Activity() {
             }
             setOnLongClickListener {
                 resetUiAfterSessionClear()
-                runBridgeCall { service?.clearSession() }
+                runBridgeCall(onSuccess = { updateSafetyControls() }) { service?.clearSession() }
                 true
             }
         }
@@ -338,17 +338,19 @@ class MainActivity : Activity() {
         qrPayload.text = ""
         messageInput.setText("")
         status.text = "Session cleared"
-        updateSafetyControls()
     }
 
-    private fun runBridgeCall(block: () -> Unit) {
+    private fun runBridgeCall(onSuccess: (() -> Unit)? = null, block: () -> Unit) {
         Thread {
             val result = runCatching(block)
             mainHandler.post {
-                result.exceptionOrNull()?.let { err ->
+                val err = result.exceptionOrNull()
+                if (err != null) {
                     status.text = "Bridge call failed: ${err.message}"
+                    updateSafetyControls()
+                } else {
+                    onSuccess?.invoke() ?: updateSafetyControls()
                 }
-                updateSafetyControls()
             }
         }.start()
     }
