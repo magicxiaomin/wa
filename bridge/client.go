@@ -683,6 +683,9 @@ func (c *Client) handleReceipt(receipt *events.Receipt) {
 		serverID := string(id)
 		c.mu.Lock()
 		started, ok := c.sentAt[serverID]
+		if ok {
+			delete(c.sentAt, serverID)
+		}
 		c.mu.Unlock()
 		if !ok {
 			continue

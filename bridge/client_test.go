@@ -561,6 +561,29 @@ func TestIncomingLIDOneToOneTextEmitsPayload(t *testing.T) {
 	}
 }
 
+func TestReceiptDeletesSentAtEntry(t *testing.T) {
+	eventsRec := newEventRecorder()
+	c, err := NewClient(eventsRec, t.TempDir(), "wa-test-device")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	c.setState(StateConnected)
+	c.mu.Lock()
+	c.sentAt["server-1"] = time.Now().Add(-time.Second)
+	c.mu.Unlock()
+
+	c.handleReceipt(&waevents.Receipt{
+		MessageIDs: []types.MessageID{types.MessageID("server-1")},
+	})
+
+	eventsRec.waitFor(t, EventMessageAck)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.sentAt["server-1"]; ok {
+		t.Fatal("sentAt entry was not deleted after matching receipt")
+	}
+}
+
 type recordedEvent struct {
 	eventType string
 	payload   string

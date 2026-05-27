@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,5 +52,35 @@ func TestExportTraceSanitizesSensitiveFields(t *testing.T) {
 	}
 	if !strings.Contains(out, `"to_suffix": "...4693"`) {
 		t.Fatalf("exported trace dropped safe suffix: %s", out)
+	}
+}
+
+func TestTraceRecorderCapsEvents(t *testing.T) {
+	var trace traceRecorder
+	for i := 0; i < maxTraceEvents+3; i++ {
+		trace.add(EventContactsSynced, StateConnected, nil)
+	}
+
+	path := filepath.Join(t.TempDir(), "trace.json")
+	if err := trace.export(path); err != nil {
+		t.Fatalf("export() error = %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	var events []traceEvent
+	if err := json.Unmarshal(raw, &events); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if len(events) != maxTraceEvents {
+		t.Fatalf("exported events len = %d, want %d", len(events), maxTraceEvents)
+	}
+	if events[0].Seq != 4 {
+		t.Fatalf("first seq = %d, want 4", events[0].Seq)
+	}
+	if events[len(events)-1].Seq != maxTraceEvents+3 {
+		t.Fatalf("last seq = %d, want %d", events[len(events)-1].Seq, maxTraceEvents+3)
 	}
 }
