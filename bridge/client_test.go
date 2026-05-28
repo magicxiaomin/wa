@@ -545,6 +545,74 @@ func TestSendTextAllowsSingleGroupJID(t *testing.T) {
 	}
 }
 
+func TestMultiAndGroupSendTraceIsRedacted(t *testing.T) {
+	oldInterval := activeOperationMinInterval
+	oldDelay := multiSendDelay
+	oldSleep := multiSendSleep
+	activeOperationMinInterval = 0
+	multiSendDelay = func() time.Duration { return 0 }
+	multiSendSleep = func(time.Duration) {}
+	defer func() {
+		activeOperationMinInterval = oldInterval
+		multiSendDelay = oldDelay
+		multiSendSleep = oldSleep
+	}()
+
+	events := newEventRecorder()
+	fake := newFakeWAAdapter()
+	fake.sendResultsByTarget = map[string]sendTextResult{
+		"15550000001@s.whatsapp.net": {
+			ServerMessageID: "server-contact-1",
+			RecipientJID:    "15550000001@s.whatsapp.net",
+			RecipientServer: "s.whatsapp.net",
+		},
+		"15550000002@s.whatsapp.net": {
+			ServerMessageID: "server-contact-2",
+			RecipientJID:    "15550000002@s.whatsapp.net",
+			RecipientServer: "s.whatsapp.net",
+		},
+		"120363000000000000@g.us": {
+			ServerMessageID: "server-group-1",
+			RecipientJID:    "120363000000000000@g.us",
+			RecipientServer: "g.us",
+		},
+	}
+	c := newStartedConnectedTestClient(t, events, fake)
+
+	const secretText = "secret multi and group body"
+	if _, err := c.SendTextMulti(`["15550000001@s.whatsapp.net","15550000002@s.whatsapp.net"]`, secretText, "multi-trace"); err != nil {
+		t.Fatalf("SendTextMulti() error = %v", err)
+	}
+	if err := c.SendText("120363000000000000@g.us", secretText, "group-trace"); err != nil {
+		t.Fatalf("SendText(group) error = %v", err)
+	}
+
+	tracePath := filepath.Join(t.TempDir(), "trace.json")
+	if err := c.ExportTrace(tracePath); err != nil {
+		t.Fatalf("ExportTrace() error = %v", err)
+	}
+	traceBytes, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("ReadFile(trace) error = %v", err)
+	}
+	trace := string(traceBytes)
+	for _, forbidden := range []string{
+		secretText,
+		"15550000001",
+		"15550000002",
+		"120363000000000000@g.us",
+	} {
+		if strings.Contains(trace, forbidden) {
+			t.Fatalf("trace leaked %q: %s", forbidden, trace)
+		}
+	}
+	for _, expected := range []string{"server-contact-1", "server-contact-2", "server-group-1", `"recipient_server": "g.us"`} {
+		if !strings.Contains(trace, expected) {
+			t.Fatalf("trace missing %q: %s", expected, trace)
+		}
+	}
+}
+
 func TestFreshLinkedDeviceCooldownBlocksContactsAndSend(t *testing.T) {
 	events := newEventRecorder()
 	fake := newFakeWAAdapter()
