@@ -60,6 +60,8 @@
 - [ ] 真机验证 `message_received` 从 `:wa_bridge` 进程经 AIDL 回主进程，再切 `Looper.getMainLooper()` 更新 UI。
 - [ ] 真机验证发送指定联系人 1 对 1 文本后收到 `message_sent` 和后续 receipt ack。
 - [ ] 谨慎验证 Clear Session：确认 UI 清空、service client 释放、重新启动后需重新扫码；该项会破坏当前登录态，建议单独安排。
+- [ ] 连续快速 Clear Session + 立即点 Connect/QR，确认只创建一个 bridge client，logcat 无“两个 client 抢 dataDir”迹象（whatsmeow.db lock / 双 bridge_started）。
+- [ ] Clear Session 后状态栏停在 "Session cleared"，不再立刻冒出 bridge_started。
 
 ## 已知未做项与原因
 
@@ -69,4 +71,5 @@
 - 问题 9 未做：需要真机长跑和国产 ROM 后台限制验证。
 - 问题 10、D、E 未做：trace 字段增强会牵动 `TRACE_SCHEMA.md`，本轮不扩大 schema。
 - B、F、G、I、J 未做：均为 confirmed，但不属于本轮前三个指定修复点。
-- B2 引入的 ensureClient 并发竞速属于 pre-existing race，本轮通过调用顺序规避，根治留到下一轮。
+- B2 暴露的 ensureClient 并发竞速属于 pre-existing race，本轮通过调用顺序规避，根治留到下一轮。
+- round 3: ensureClient 加 @Volatile + 双检锁；getSafetyStatus 在 client==null 时返回 {} 不再自动重建，消除 clear 后 bridge_started 闪烁。
