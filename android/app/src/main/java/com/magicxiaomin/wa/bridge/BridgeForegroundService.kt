@@ -16,7 +16,8 @@ import bridge.EventCallback
 
 class BridgeForegroundService : Service() {
     private val callbacks = RemoteCallbackList<IBridgeCallback>()
-    private var client: Client? = null
+    private val clientLock = Any()
+    @Volatile private var client: Client? = null
 
     private val binder = object : IBridgeService.Stub() {
         override fun registerCallback(callback: IBridgeCallback) {
@@ -69,9 +70,11 @@ class BridgeForegroundService : Service() {
 
         override fun clearSession() {
             call("clearSession") {
-                val activeClient = client ?: ensureClient("WA-Android")
-                activeClient.clearSession()
-                client = null
+                synchronized(clientLock) {
+                    val activeClient = client ?: createClientLocked("WA-Android")
+                    activeClient.clearSession()
+                    client = null
+                }
             }
         }
     }
@@ -96,6 +99,12 @@ class BridgeForegroundService : Service() {
 
     private fun ensureClient(deviceName: String): Client {
         client?.let { return it }
+        return synchronized(clientLock) {
+            client ?: createClientLocked(deviceName)
+        }
+    }
+
+    private fun createClientLocked(deviceName: String): Client {
         val dataDir = filesDir.resolve("wa-session").absolutePath
         val callback = object : EventCallback {
             override fun onEvent(eventType: String, payloadJSON: String) {
