@@ -48,11 +48,13 @@
 3. 额外 A / C：receipt 后删除 `sentAt`；trace 改 5000 条环形缓冲。
 
 未修改 `REVIEW_CLAUDE_2026-05-27.md`。未扩大 `allowedTestNumbers`，未移除发送频率限制，未把消息正文写进 trace。trace 字段结构没有新增/删除，仅改变内存保留上限，因此本轮未改 `TRACE_SCHEMA.md`。
+测试覆盖本轮三项核心字段；多 receipt 路径补在 round 2。
 
 ## 真机回归 checklist
 
 - [x] `GOPROXY=https://goproxy.cn,direct $HOME/.local/share/codex-wa-tools/go1.26.3/bin/go test ./bridge` 通过。
 - [x] `./android/build_debug_go126.sh` 通过，已用 Go 1.26.3 重编 `wamobile.aar` 并生成 debug APK。
+- [ ] reviewer 侧重跑 `./android/build_debug_go126.sh` 并对 `wamobile.aar` 做 `shasum`。
 - [x] sqlite 驱动仍为 `modernc.org/sqlite`，未引入 cgo sqlite。
 - [ ] 安装 `android/app/build/outputs/apk/debug/app-debug.apk` 到真机，保留现有 session 验证 `session_restored`。
 - [ ] 真机验证 `message_received` 从 `:wa_bridge` 进程经 AIDL 回主进程，再切 `Looper.getMainLooper()` 更新 UI。
@@ -67,3 +69,4 @@
 - 问题 9 未做：需要真机长跑和国产 ROM 后台限制验证。
 - 问题 10、D、E 未做：trace 字段增强会牵动 `TRACE_SCHEMA.md`，本轮不扩大 schema。
 - B、F、G、I、J 未做：均为 confirmed，但不属于本轮前三个指定修复点。
+- B2 引入的 ensureClient 并发竞速属于 pre-existing race，本轮通过调用顺序规避，根治留到下一轮。
