@@ -49,7 +49,7 @@ class BridgeForegroundService : Service() {
         }
 
         override fun getSafetyStatus(): String {
-            return callWithResult("getSafetyStatus", "{}") { ensureClient("WA-Android").safetyStatus() }
+            return callWithResult("getSafetyStatus", "{}") { client?.safetyStatus() ?: "{}" }
         }
 
         override fun getContacts(): String {
