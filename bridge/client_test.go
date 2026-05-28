@@ -403,6 +403,20 @@ func TestSendTextMultiRejectsFourRecipientsWithoutSending(t *testing.T) {
 	}
 }
 
+func TestSendTextMultiRejectsGroupRecipient(t *testing.T) {
+	events := newEventRecorder()
+	fake := newFakeWAAdapter()
+	c := newStartedConnectedTestClient(t, events, fake)
+
+	_, err := c.SendTextMulti(`["120363000000000000@g.us"]`, "hello", "multi-group")
+	if err == nil || !strings.Contains(err.Error(), "only supports 1:1 contact recipients") {
+		t.Fatalf("SendTextMulti() error = %v, want group rejection", err)
+	}
+	if fake.sendCalls != 0 {
+		t.Fatalf("group SendTextMulti reached adapter %d times", fake.sendCalls)
+	}
+}
+
 func TestSendTextMultiContinuesAfterSingleRecipientFailure(t *testing.T) {
 	oldInterval := activeOperationMinInterval
 	oldDelay := multiSendDelay
@@ -476,6 +490,58 @@ func TestGetContactsReturnsJSON(t *testing.T) {
 	}
 	if !strings.Contains(got, `"jid":"15551234567@s.whatsapp.net"`) {
 		t.Fatalf("GetContacts() missing contact JID: %s", got)
+	}
+}
+
+func TestGetGroupsReturnsJSON(t *testing.T) {
+	oldInterval := activeOperationMinInterval
+	activeOperationMinInterval = 0
+	defer func() { activeOperationMinInterval = oldInterval }()
+
+	events := newEventRecorder()
+	fake := newFakeWAAdapter()
+	c := newStartedConnectedTestClient(t, events, fake)
+
+	got, err := c.GetGroups()
+	if err != nil {
+		t.Fatalf("GetGroups() error = %v", err)
+	}
+	if !strings.Contains(got, `"jid":"120363000000000000@g.us"`) {
+		t.Fatalf("GetGroups() missing group JID: %s", got)
+	}
+	if !strings.Contains(got, `"participant_count":3`) {
+		t.Fatalf("GetGroups() missing participant count: %s", got)
+	}
+}
+
+func TestSendTextAllowsSingleGroupJID(t *testing.T) {
+	oldInterval := activeOperationMinInterval
+	activeOperationMinInterval = 0
+	defer func() { activeOperationMinInterval = oldInterval }()
+
+	events := newEventRecorder()
+	fake := newFakeWAAdapter()
+	fake.sendResultsByTarget = map[string]sendTextResult{
+		"120363000000000000@g.us": {
+			ServerMessageID: "group-server-1",
+			RecipientJID:    "120363000000000000@g.us",
+			RecipientServer: "g.us",
+		},
+	}
+	c := newStartedConnectedTestClient(t, events, fake)
+
+	if err := c.SendText("120363000000000000@g.us", "hello group", "group-client-1"); err != nil {
+		t.Fatalf("SendText(group) error = %v", err)
+	}
+	if fake.sendCalls != 1 {
+		t.Fatalf("send calls = %d, want 1", fake.sendCalls)
+	}
+	got := events.waitFor(t, EventMessageSent)
+	if !strings.Contains(got.payload, `"server_msg_id":"group-server-1"`) {
+		t.Fatalf("group message_sent missing server id: %s", got.payload)
+	}
+	if !strings.Contains(got.payload, `"recipient_server":"g.us"`) {
+		t.Fatalf("group message_sent missing recipient server: %s", got.payload)
 	}
 }
 
@@ -804,6 +870,10 @@ func (f *fakeWAAdapter) SendText(ctx context.Context, phone string, text string,
 
 func (f *fakeWAAdapter) GetContacts(context.Context) ([]contactInfo, error) {
 	return []contactInfo{{JID: "15551234567@s.whatsapp.net", Name: "Test Contact"}}, nil
+}
+
+func (f *fakeWAAdapter) GetGroups(context.Context) ([]groupInfo, error) {
+	return []groupInfo{{JID: "120363000000000000@g.us", Name: "Test Group", ParticipantCount: 3}}, nil
 }
 
 func (f *fakeWAAdapter) ResolveJID(context.Context, string) (string, error) {

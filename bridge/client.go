@@ -107,6 +107,7 @@ type waAdapter interface {
 	ReconnectAfterLogin(context.Context) error
 	SendText(context.Context, string, string, string) (sendTextResult, error)
 	GetContacts(context.Context) ([]contactInfo, error)
+	GetGroups(context.Context) ([]groupInfo, error)
 	ResolveJID(context.Context, string) (string, error)
 	Disconnect()
 	Close() error
@@ -139,6 +140,12 @@ type qrItem struct {
 type contactInfo struct {
 	JID  string `json:"jid"`
 	Name string `json:"name"`
+}
+
+type groupInfo struct {
+	JID              string `json:"jid"`
+	Name             string `json:"name"`
+	ParticipantCount int    `json:"participant_count"`
 }
 
 type persistedRiskStop struct {
@@ -341,6 +348,13 @@ func (c *Client) SendTextMulti(toJidsJSON string, text string, clientMsgId strin
 		c.emitMessageFailed(clientMsgId, "too_many_recipients", err.Error())
 		return "", err
 	}
+	for _, target := range trimmed {
+		if isGroupJIDString(target) {
+			err := errors.New("SendTextMulti only supports 1:1 contact recipients; send one group with SendText")
+			c.emitMessageFailed(clientMsgId, "invalid_request", err.Error())
+			return "", err
+		}
+	}
 
 	results := make([]multiSendResult, 0, len(trimmed))
 	for i, target := range trimmed {
@@ -526,6 +540,44 @@ func (c *Client) GetContacts() (contactsJSON string, err error) {
 		contacts = []contactInfo{}
 	}
 	b, err := json.Marshal(contacts)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+func (c *Client) GetGroups() (groupsJSON string, err error) {
+	defer c.recoverAsError("GetGroups", &err)
+
+	c.mu.Lock()
+	if remaining := c.riskRemainingLocked(); remaining > 0 {
+		reason := c.riskReason
+		c.mu.Unlock()
+		return "", riskStoppedError(reason, remaining)
+	}
+	adapter := c.wa
+	if remaining := c.activeOperationRemainingLocked(); remaining > 0 {
+		c.mu.Unlock()
+		return "", activeOperationCooldownError("reading groups", remaining)
+	}
+	if c.state != StateConnected {
+		state := c.state
+		c.mu.Unlock()
+		return "", fmt.Errorf("client state is %q, want %q", state, StateConnected)
+	}
+	c.reserveActiveOperationLocked()
+	c.mu.Unlock()
+	if adapter == nil {
+		return "", errors.New("whatsmeow adapter is not initialized")
+	}
+	groups, err := adapter.GetGroups(context.Background())
+	if err != nil {
+		return "", err
+	}
+	if groups == nil {
+		groups = []groupInfo{}
+	}
+	b, err := json.Marshal(groups)
 	if err != nil {
 		return "", err
 	}
@@ -1118,6 +1170,10 @@ func recipientSuffix(recipient string) string {
 		return jidSuffix(recipient)
 	}
 	return maskedPhone(normalizePhone(recipient))
+}
+
+func isGroupJIDString(value string) bool {
+	return strings.HasSuffix(strings.TrimSpace(value), "@g.us")
 }
 
 func sendRoutePayload(result sendTextResult) map[string]any {

@@ -146,6 +146,28 @@ func (a *whatsmeowAdapter) GetContacts(ctx context.Context) ([]contactInfo, erro
 	return out, nil
 }
 
+func (a *whatsmeowAdapter) GetGroups(ctx context.Context) ([]groupInfo, error) {
+	groups, err := a.client.GetJoinedGroups(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]groupInfo, 0, len(groups))
+	for _, group := range groups {
+		if group == nil || group.JID.IsEmpty() {
+			continue
+		}
+		out = append(out, groupInfo{
+			JID:              group.JID.String(),
+			Name:             firstNonEmpty(group.Name, group.JID.User),
+			ParticipantCount: group.ParticipantCount,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
+	})
+	return out, nil
+}
+
 func (a *whatsmeowAdapter) ResolveJID(ctx context.Context, to string) (string, error) {
 	jid, err := a.resolveJID(ctx, to)
 	if err != nil {
@@ -164,8 +186,14 @@ func (a *whatsmeowAdapter) resolveJID(ctx context.Context, to string) (types.JID
 		if err != nil {
 			return types.EmptyJID, fmt.Errorf("parse recipient JID: %w", err)
 		}
+		if jid.Server == types.GroupServer {
+			if jid.User == "" {
+				return types.EmptyJID, errors.New("group JID is missing group id")
+			}
+			return jid, nil
+		}
 		if !isOneToOneUserJID(jid) || jid.User == "" {
-			return types.EmptyJID, fmt.Errorf("recipient must be a 1:1 WhatsApp user JID")
+			return types.EmptyJID, fmt.Errorf("recipient must be a 1:1 WhatsApp user JID or group JID")
 		}
 		if jid.Server == types.HiddenUserServer && a.client != nil && a.client.Store != nil && a.client.Store.LIDs != nil {
 			pn, err := a.client.Store.LIDs.GetPNForLID(ctx, jid)
