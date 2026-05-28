@@ -39,19 +39,24 @@ class MainActivity : Activity() {
         }
     }
     private data class PendingSend(val target: String, val text: String, val startedAtMs: Long)
+    private data class ContactItem(val jid: String, val name: String)
+    private data class GroupItem(val jid: String, val name: String, val participantCount: Int)
 
     private var service: IBridgeService? = null
-    private var selectedJid: String = ""
+    private val selectedContactJids = linkedSetOf<String>()
+    private var selectedGroupJid: String = ""
     private val pendingSends = mutableMapOf<String, PendingSend>()
 
     private lateinit var status: TextView
     private lateinit var qrImage: ImageView
     private lateinit var qrPayload: TextView
     private lateinit var contacts: ListView
+    private lateinit var groups: ListView
     private lateinit var conversation: TextView
     private lateinit var messageInput: EditText
     private lateinit var connectButton: Button
     private lateinit var contactsButton: Button
+    private lateinit var groupsButton: Button
     private lateinit var sendButton: Button
     private lateinit var disconnectButton: Button
     private lateinit var exportTraceButton: Button
@@ -110,6 +115,16 @@ class MainActivity : Activity() {
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 (64 * resources.displayMetrics.density * 5).toInt()
             )
+            choiceMode = ListView.CHOICE_MODE_MULTIPLE
+            isVerticalScrollBarEnabled = true
+            scrollBarStyle = ListView.SCROLLBARS_INSIDE_INSET
+        }
+        groups = ListView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                (56 * resources.displayMetrics.density * 4).toInt()
+            )
+            choiceMode = ListView.CHOICE_MODE_SINGLE
             isVerticalScrollBarEnabled = true
             scrollBarStyle = ListView.SCROLLBARS_INSIDE_INSET
         }
@@ -133,6 +148,10 @@ class MainActivity : Activity() {
         contactsButton = Button(this).apply {
             text = "Get Contacts"
             setOnClickListener { loadContacts() }
+        }
+        groupsButton = Button(this).apply {
+            text = "Get Groups"
+            setOnClickListener { loadGroups() }
         }
         sendButton = Button(this).apply {
             text = "Send"
@@ -195,6 +214,8 @@ class MainActivity : Activity() {
             addView(qrPayload)
             addView(contactsButton)
             addView(contacts)
+            addView(groupsButton)
+            addView(groups)
             addView(messageInput)
             addView(sendButton)
             addView(disconnectButton)
@@ -260,7 +281,7 @@ class MainActivity : Activity() {
         }
         runBridgeCall {
             val json = service?.contacts ?: "[]"
-            val items = mutableListOf<Pair<String, String>>()
+            val items = mutableListOf<ContactItem>()
             val seenJids = mutableSetOf<String>()
             val array = if (json.trimStart().startsWith("[")) JSONArray(json) else JSONArray()
             for (i in 0 until array.length()) {
@@ -268,20 +289,69 @@ class MainActivity : Activity() {
                 val jid = item.optString("jid")
                 val name = item.optString("name", jid)
                 if (jid.isNotBlank() && seenJids.add(jid)) {
-                    items += jid to name
+                    items += ContactItem(jid, name)
                 }
             }
             mainHandler.post {
+                selectedContactJids.clear()
                 contacts.adapter = ArrayAdapter(
                     this,
-                    android.R.layout.simple_list_item_1,
-                    items.map { "${it.second}\n${it.first}" }
+                    android.R.layout.simple_list_item_multiple_choice,
+                    items.map { "${it.name}\n${it.jid}" }
                 )
                 contacts.setOnItemClickListener { _, _, position, _ ->
-                    selectedJid = items[position].first
-                    status.text = "Selected $selectedJid"
+                    val jid = items[position].jid
+                    if (selectedContactJids.contains(jid)) {
+                        selectedContactJids.remove(jid)
+                    } else if (selectedContactJids.size >= MAX_MULTI_CONTACTS) {
+                        contacts.setItemChecked(position, false)
+                        status.text = "最多选择 $MAX_MULTI_CONTACTS 个联系人"
+                        return@setOnItemClickListener
+                    } else {
+                        selectedContactJids.add(jid)
+                        selectedGroupJid = ""
+                        groups.clearChoices()
+                    }
+                    status.text = "Selected contacts: ${selectedContactJids.size}"
                 }
                 status.text = "Contacts: ${items.size}"
+                updateSafetyControls()
+            }
+        }
+    }
+
+    private fun loadGroups() {
+        if (!groupsButton.isEnabled) {
+            return
+        }
+        runBridgeCall {
+            val json = service?.groups ?: "[]"
+            val items = mutableListOf<GroupItem>()
+            val array = if (json.trimStart().startsWith("[")) JSONArray(json) else JSONArray()
+            for (i in 0 until array.length()) {
+                val item = array.getJSONObject(i)
+                val jid = item.optString("jid")
+                val name = item.optString("name", jid)
+                val count = item.optInt("participant_count", 0)
+                if (jid.isNotBlank()) {
+                    items += GroupItem(jid, name, count)
+                }
+            }
+            mainHandler.post {
+                selectedGroupJid = ""
+                groups.adapter = ArrayAdapter(
+                    this,
+                    android.R.layout.simple_list_item_single_choice,
+                    items.map { "${it.name} (${it.participantCount})\n${it.jid}" }
+                )
+                groups.setOnItemClickListener { _, _, position, _ ->
+                    selectedGroupJid = items[position].jid
+                    selectedContactJids.clear()
+                    contacts.clearChoices()
+                    contacts.invalidateViews()
+                    status.text = "Selected group: ${items[position].name}"
+                }
+                status.text = "Groups: ${items.size}"
                 updateSafetyControls()
             }
         }
@@ -292,14 +362,30 @@ class MainActivity : Activity() {
             return
         }
         val text = messageInput.text.toString()
-        if (selectedJid.isBlank() || text.isBlank()) {
-            status.text = "Select a contact and enter text first"
+        if (text.isBlank()) {
+            status.text = "Enter text first"
             return
         }
+        if (selectedGroupJid.isNotBlank()) {
+            sendGroupMessage(text)
+            return
+        }
+        if (selectedContactJids.isEmpty()) {
+            status.text = "Select 1-$MAX_MULTI_CONTACTS contacts or one group first"
+            return
+        }
+        if (selectedContactJids.size > MAX_MULTI_CONTACTS) {
+            status.text = "最多选择 $MAX_MULTI_CONTACTS 个联系人"
+            return
+        }
+        sendMultiContactMessage(text, selectedContactJids.toList())
+    }
+
+    private fun sendGroupMessage(text: String) {
         val clientMsgId = "android-${UUID.randomUUID()}"
-        pendingSends[clientMsgId] = PendingSend(selectedJid, text, System.currentTimeMillis())
-        appendConversation("OUT pending[${shortClientMsgId(clientMsgId)}] $selectedJid: $text")
-        val target = selectedJid
+        pendingSends[clientMsgId] = PendingSend(selectedGroupJid, text, System.currentTimeMillis())
+        appendConversation("OUT group pending[${shortClientMsgId(clientMsgId)}] $selectedGroupJid: $text")
+        val target = selectedGroupJid
         mainHandler.postDelayed({
             if (pendingSends.remove(clientMsgId) != null) {
                 appendConversation("FAILED ${shortClientMsgId(clientMsgId)} local_timeout: no terminal send event after ${UI_SEND_TIMEOUT_MS / 1000}s")
@@ -317,6 +403,52 @@ class MainActivity : Activity() {
         }.start()
         messageInput.setText("")
         updateSafetyControls()
+    }
+
+    private fun sendMultiContactMessage(text: String, targets: List<String>) {
+        val baseClientMsgId = "android-${UUID.randomUUID()}"
+        targets.forEachIndexed { index, target ->
+            val childClientMsgId = "$baseClientMsgId-${index + 1}"
+            pendingSends[childClientMsgId] = PendingSend(target, text, System.currentTimeMillis())
+            mainHandler.postDelayed({
+                if (pendingSends.remove(childClientMsgId) != null) {
+                    appendConversation("FAILED ${shortClientMsgId(childClientMsgId)} local_timeout: no terminal send event after ${UI_SEND_TIMEOUT_MS / 1000}s")
+                    updateSafetyControls()
+                }
+            }, UI_SEND_TIMEOUT_MS)
+        }
+        appendConversation("OUT multi pending ${targets.size}: $text")
+        val payload = JSONArray()
+        targets.forEach { payload.put(it) }
+        Thread {
+            val result = runCatching { service?.sendTextMulti(payload.toString(), text, baseClientMsgId) ?: "[]" }
+            mainHandler.post {
+                result.onSuccess { json ->
+                    appendMultiSendResults(json)
+                }.onFailure { err ->
+                    targets.forEachIndexed { index, _ ->
+                        markSendFailed("$baseClientMsgId-${index + 1}", "bridge_call_failed", err.message ?: "unknown")
+                    }
+                }
+                updateSafetyControls()
+            }
+        }.start()
+        messageInput.setText("")
+        updateSafetyControls()
+    }
+
+    private fun appendMultiSendResults(resultsJson: String) {
+        val array = if (resultsJson.trimStart().startsWith("[")) JSONArray(resultsJson) else JSONArray()
+        for (i in 0 until array.length()) {
+            val item = array.getJSONObject(i)
+            val clientMsgId = item.optString("clientMsgId")
+            if (item.optBoolean("ok", false)) {
+                pendingSends.remove(clientMsgId)
+                appendConversation("MULTI OK ${shortClientMsgId(clientMsgId)} ${item.optString("server_msg_id")}")
+            } else {
+                markSendFailed(clientMsgId, item.optString("error_code", "send_failed"), item.optString("error", "unknown"))
+            }
+        }
     }
 
     private fun exportTrace() {
@@ -357,6 +489,7 @@ class MainActivity : Activity() {
             mainHandler.post {
                 connectButton.isEnabled = !riskStopped
                 contactsButton.isEnabled = !riskStopped && contactsWait <= 0 && operationWait <= 0
+                groupsButton.isEnabled = !riskStopped && operationWait <= 0
                 sendButton.isEnabled = !riskStopped && sendWait <= 0 && operationWait <= 0 && pendingSends.isEmpty()
                 mainHandler.removeCallbacks(safetyRefreshRunnable)
                 if (nextWait > 0) {
@@ -404,5 +537,6 @@ class MainActivity : Activity() {
 
     companion object {
         private const val UI_SEND_TIMEOUT_MS = 75_000L
+        private const val MAX_MULTI_CONTACTS = 3
     }
 }

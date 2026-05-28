@@ -55,12 +55,20 @@ class BridgeForegroundService : Service() {
             return callWithResult("getContacts", "[]") { ensureClient("WA-Android").contacts }
         }
 
+        override fun getGroups(): String {
+            return callWithResult("getGroups", "[]") { ensureClient("WA-Android").groups }
+        }
+
         override fun resolveJID(phoneOrJid: String): String {
             return callWithResult("resolveJID", "") { ensureClient("WA-Android").resolveJID(phoneOrJid) }
         }
 
         override fun sendText(to: String, text: String, clientMsgId: String) {
             call("sendText") { ensureClient("WA-Android").sendText(to, text, clientMsgId) }
+        }
+
+        override fun sendTextMulti(toJidsJson: String, text: String, clientMsgId: String): String {
+            return callWithResult("sendTextMulti", "[]") { ensureClient("WA-Android").sendTextMulti(toJidsJson, text, clientMsgId) }
         }
 
         override fun exportTrace(path: String) {
