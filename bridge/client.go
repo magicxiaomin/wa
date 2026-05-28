@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,7 +44,10 @@ const (
 	EventRiskStopped      = "risk_stopped"
 )
 
-const maxSendsPerRun = 5
+const (
+	maxSendsPerRun         = 5
+	maxMultiSendRecipients = 3
+)
 
 const (
 	freshLinkContactDelay = 2 * time.Minute
@@ -58,6 +62,8 @@ var (
 	rateLimitStopDelay         = 30 * time.Minute
 	riskStopDelay              = 24 * time.Hour
 	sendTextTimeout            = 45 * time.Second
+	multiSendDelay             = randomMultiSendDelay
+	multiSendSleep             = time.Sleep
 )
 
 var allowedTestNumbers = map[string]struct{}{
@@ -101,6 +107,7 @@ type waAdapter interface {
 	ReconnectAfterLogin(context.Context) error
 	SendText(context.Context, string, string, string) (sendTextResult, error)
 	GetContacts(context.Context) ([]contactInfo, error)
+	GetGroups(context.Context) ([]groupInfo, error)
 	ResolveJID(context.Context, string) (string, error)
 	Disconnect()
 	Close() error
@@ -114,6 +121,13 @@ type sendTextResult struct {
 	UsedLID         bool
 }
 
+type multiSendResult struct {
+	JIDSuffix       string `json:"jid_suffix"`
+	OK              bool   `json:"ok"`
+	ServerMessageID string `json:"server_msg_id,omitempty"`
+	Error           string `json:"error,omitempty"`
+}
+
 type qrItem struct {
 	Event   string
 	Code    string
@@ -124,6 +138,12 @@ type qrItem struct {
 type contactInfo struct {
 	JID  string `json:"jid"`
 	Name string `json:"name"`
+}
+
+type groupInfo struct {
+	JID              string `json:"jid"`
+	Name             string `json:"name"`
+	ParticipantCount int    `json:"participant_count"`
 }
 
 type persistedRiskStop struct {
@@ -313,47 +333,121 @@ func (c *Client) sendTextChecked(to string, text string, clientMsgId string) err
 		return err
 	}
 
-	c.mu.Lock()
-	if remaining := c.riskRemainingLocked(); remaining > 0 {
-		reason := c.riskReason
-		c.mu.Unlock()
-		err := riskStoppedError(reason, remaining)
-		c.emitMessageFailed(clientMsgId, "risk_stopped", err.Error())
+	adapter, code, err := c.checkSendGate(1)
+	if err != nil {
+		c.emitMessageFailed(clientMsgId, code, err.Error())
 		return err
 	}
-	if c.sendCount >= maxSendsPerRun {
-		c.mu.Unlock()
-		err := fmt.Errorf("send limit exceeded: max %d messages per run", maxSendsPerRun)
-		c.emitMessageFailed(clientMsgId, "send_limit_exceeded", err.Error())
-		return err
+	_, _, err = c.sendOneText(adapter, target, text, clientMsgId)
+	return err
+}
+
+func (c *Client) SendTextMulti(toJidsJson string, text string, clientMsgId string) (resultsJSON string, err error) {
+	defer c.recoverAsError("SendTextMulti", &err)
+
+	if clientMsgId == "" {
+		err := errors.New("clientMsgId is required")
+		c.emitMessageFailed(clientMsgId, "invalid_request", err.Error())
+		return "", err
+	}
+	if strings.TrimSpace(text) == "" {
+		err := errors.New("text is required")
+		c.emitMessageFailed(clientMsgId, "invalid_request", err.Error())
+		return "", err
+	}
+
+	var targets []string
+	if err := json.Unmarshal([]byte(toJidsJson), &targets); err != nil {
+		err := fmt.Errorf("toJidsJson must be a JSON array: %w", err)
+		c.emitMessageFailed(clientMsgId, "invalid_request", err.Error())
+		return "", err
+	}
+	trimmed := make([]string, 0, len(targets))
+	for _, target := range targets {
+		target = strings.TrimSpace(target)
+		if target != "" {
+			trimmed = append(trimmed, target)
+		}
+	}
+	if len(trimmed) == 0 {
+		err := errors.New("at least one recipient is required")
+		c.emitMessageFailed(clientMsgId, "invalid_request", err.Error())
+		return "", err
+	}
+	if len(trimmed) > maxMultiSendRecipients {
+		err := fmt.Errorf("exceeds max %d recipients", maxMultiSendRecipients)
+		c.emitMessageFailed(clientMsgId, "too_many_recipients", err.Error())
+		return "", err
+	}
+	for _, target := range trimmed {
+		if !isPersonalRecipientJID(target) {
+			err := errors.New("recipient must be a 1:1 WhatsApp user JID")
+			c.emitMessageFailed(clientMsgId, "invalid_request", err.Error())
+			return "", err
+		}
+	}
+
+	adapter, code, err := c.checkSendGate(len(trimmed))
+	if err != nil {
+		c.emitMessageFailed(clientMsgId, code, err.Error())
+		return "", err
+	}
+
+	results := make([]multiSendResult, 0, len(trimmed))
+	for i, target := range trimmed {
+		childClientMsgID := fmt.Sprintf("%s#%d", clientMsgId, i)
+		result, _, sendErr := c.sendOneText(adapter, target, text, childClientMsgID)
+		item := multiSendResult{
+			JIDSuffix: jidSuffix(target),
+			OK:        sendErr == nil,
+		}
+		if sendErr == nil {
+			item.ServerMessageID = result.ServerMessageID
+		} else {
+			item.Error = sanitizeError(sendErr.Error(), target, normalizePhone(target), text)
+		}
+		results = append(results, item)
+		if i < len(trimmed)-1 {
+			multiSendSleep(multiSendDelay())
+		}
+	}
+
+	b, err := json.Marshal(results)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+func (c *Client) checkSendGate(recipientCount int) (waAdapter, string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if remaining := c.riskRemainingLocked(); remaining > 0 {
+		return nil, "risk_stopped", riskStoppedError(c.riskReason, remaining)
+	}
+	if c.sendCount+recipientCount > maxSendsPerRun {
+		return nil, "send_limit_exceeded", fmt.Errorf("send limit exceeded: max %d messages per run", maxSendsPerRun)
 	}
 	if remaining := c.freshLinkRemainingLocked(freshLinkSendDelay); remaining > 0 {
-		c.mu.Unlock()
-		err := freshLinkCooldownError("sending", remaining)
-		c.emitMessageFailed(clientMsgId, "fresh_link_cooldown", err.Error())
-		return err
+		return nil, "fresh_link_cooldown", freshLinkCooldownError("sending", remaining)
 	}
 	if remaining := c.activeOperationRemainingLocked(); remaining > 0 {
-		c.mu.Unlock()
-		err := activeOperationCooldownError("sending", remaining)
-		c.emitMessageFailed(clientMsgId, "operation_backoff", err.Error())
-		return err
+		return nil, "operation_backoff", activeOperationCooldownError("sending", remaining)
 	}
 	if c.state != StateConnected {
-		c.mu.Unlock()
-		err := fmt.Errorf("client state is %q, want %q", c.state, StateConnected)
-		c.emitMessageFailed(clientMsgId, "not_connected", err.Error())
-		return err
+		return nil, "not_connected", fmt.Errorf("client state is %q, want %q", c.state, StateConnected)
 	}
-	adapter := c.wa
-	c.sendCount++
+	if c.wa == nil {
+		return nil, "not_started", errors.New("whatsmeow adapter is not initialized")
+	}
 	c.reserveActiveOperationLocked()
+	return c.wa, "", nil
+}
+
+func (c *Client) sendOneText(adapter waAdapter, target string, text string, clientMsgId string) (sendTextResult, string, error) {
+	c.mu.Lock()
+	c.sendCount++
 	c.mu.Unlock()
-	if adapter == nil {
-		err := errors.New("whatsmeow adapter is not initialized")
-		c.emitMessageFailed(clientMsgId, "not_started", err.Error())
-		return err
-	}
 
 	started := time.Now()
 	startPayload := map[string]any{
@@ -370,11 +464,11 @@ func (c *Client) sendTextChecked(to string, text string, clientMsgId string) err
 		message := sanitizeError(err.Error(), target, normalizePhone(target), text)
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			c.emitMessageFailed(clientMsgId, "send_timeout", message, sendRoutePayload(result))
-			return err
+			return result, "send_timeout", err
 		}
 		c.emitMessageFailed(clientMsgId, "send_failed", message, sendRoutePayload(result))
 		c.enterRiskStopIfNeeded("sendText", err)
-		return err
+		return result, "send_failed", err
 	}
 
 	latencyMS := time.Since(started).Milliseconds()
@@ -390,7 +484,11 @@ func (c *Client) sendTextChecked(to string, text string, clientMsgId string) err
 		payload[key] = value
 	}
 	c.emit(EventMessageSent, payload, payload)
-	return nil
+	return result, "", nil
+}
+
+func randomMultiSendDelay() time.Duration {
+	return time.Duration(3+rand.Intn(6)) * time.Second
 }
 
 func (c *Client) GetContacts() (contactsJSON string, err error) {
@@ -430,6 +528,44 @@ func (c *Client) GetContacts() (contactsJSON string, err error) {
 		contacts = []contactInfo{}
 	}
 	b, err := json.Marshal(contacts)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+func (c *Client) GetGroups() (groupsJSON string, err error) {
+	defer c.recoverAsError("GetGroups", &err)
+
+	c.mu.Lock()
+	if remaining := c.riskRemainingLocked(); remaining > 0 {
+		reason := c.riskReason
+		c.mu.Unlock()
+		return "", riskStoppedError(reason, remaining)
+	}
+	adapter := c.wa
+	if remaining := c.activeOperationRemainingLocked(); remaining > 0 {
+		c.mu.Unlock()
+		return "", activeOperationCooldownError("reading groups", remaining)
+	}
+	if c.state != StateConnected {
+		state := c.state
+		c.mu.Unlock()
+		return "", fmt.Errorf("client state is %q, want %q", state, StateConnected)
+	}
+	c.reserveActiveOperationLocked()
+	c.mu.Unlock()
+	if adapter == nil {
+		return "", errors.New("whatsmeow adapter is not initialized")
+	}
+	groups, err := adapter.GetGroups(context.Background())
+	if err != nil {
+		return "", err
+	}
+	if groups == nil {
+		groups = []groupInfo{}
+	}
+	b, err := json.Marshal(groups)
 	if err != nil {
 		return "", err
 	}
@@ -1034,6 +1170,15 @@ func recipientSuffix(recipient string) string {
 		return jidSuffix(recipient)
 	}
 	return maskedPhone(normalizePhone(recipient))
+}
+
+func isPersonalRecipientJID(recipient string) bool {
+	at := strings.LastIndexByte(recipient, '@')
+	if at <= 0 {
+		return false
+	}
+	server := recipient[at+1:]
+	return server == "s.whatsapp.net" || server == "lid"
 }
 
 func sendRoutePayload(result sendTextResult) map[string]any {

@@ -11,8 +11,10 @@ interface IBridgeService {
     String getState();
     String getSafetyStatus();
     String getContacts();
+    String getGroups();
     String resolveJID(String phoneOrJid);
     void sendText(String to, String text, String clientMsgId);
+    String sendTextMulti(String toJidsJson, String text, String clientMsgId);
     void exportTrace(String path);
     void clearSession();
 }
