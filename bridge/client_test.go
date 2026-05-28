@@ -175,7 +175,6 @@ func TestClearSessionResetsClientState(t *testing.T) {
 	}
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.wa != nil || c.started || c.hadSession || c.cancel != nil {
 		t.Fatalf("client state not reset: wa=%v started=%v hadSession=%v cancelNil=%v", c.wa, c.started, c.hadSession, c.cancel == nil)
 	}
@@ -188,11 +187,15 @@ func TestClearSessionResetsClientState(t *testing.T) {
 	if c.state != StateDisconnected {
 		t.Fatalf("state = %q, want %q", c.state, StateDisconnected)
 	}
+	c.mu.Unlock()
 	if !fake.disconnected || !fake.closed {
 		t.Fatalf("adapter cleanup incomplete: disconnected=%v closed=%v", fake.disconnected, fake.closed)
 	}
 	if _, err := os.Stat(dataDir); !os.IsNotExist(err) {
 		t.Fatalf("session data dir still exists or unexpected stat error: %v", err)
+	}
+	if err := c.Connect(); err == nil || !strings.Contains(err.Error(), "client is not started") {
+		t.Fatalf("Connect() error = %v, want client is not started", err)
 	}
 }
 
