@@ -3,15 +3,16 @@ module github.com/magicxiaomin/wa
 go 1.25.0
 
 require (
+	github.com/coder/websocket v1.8.14
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	go.mau.fi/whatsmeow v0.0.0-20260525123251-933deb5f2ee9
+	google.golang.org/protobuf v1.36.11
 	modernc.org/sqlite v1.50.1
 )
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/beeper/argo-go v1.1.2 // indirect
-	github.com/coder/websocket v1.8.14 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/elliotchance/orderedmap/v3 v3.1.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
@@ -33,7 +34,6 @@ require (
 	golang.org/x/sys v0.44.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 	golang.org/x/tools v0.45.0 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
 	modernc.org/libc v1.72.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect

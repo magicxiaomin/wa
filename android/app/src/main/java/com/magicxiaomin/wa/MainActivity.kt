@@ -13,6 +13,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.text.InputType
 import android.view.WindowInsets
 import android.widget.ArrayAdapter
 import android.widget.Button
@@ -49,6 +50,7 @@ class MainActivity : Activity() {
     private val selectedContactJids = linkedSetOf<String>()
     private var selectedGroupJid: String = ""
     private var sendInProgress = false
+    private var remoteRelayEnabled = false
     private val pendingSends = mutableMapOf<String, PendingSend>()
 
     private lateinit var status: TextView
@@ -57,10 +59,13 @@ class MainActivity : Activity() {
     private lateinit var contacts: ListView
     private lateinit var conversation: TextView
     private lateinit var messageInput: EditText
+    private lateinit var remoteUrlInput: EditText
+    private lateinit var remoteTokenInput: EditText
     private lateinit var connectButton: Button
     private lateinit var contactsButton: Button
     private lateinit var groupsButton: Button
     private lateinit var sendButton: Button
+    private lateinit var remoteRelayButton: Button
     private lateinit var disconnectButton: Button
     private lateinit var exportTraceButton: Button
 
@@ -78,6 +83,7 @@ class MainActivity : Activity() {
             service?.registerCallback(callback)
             service?.startBridge("WA-Android")
             status.text = "Bridge service connected: ${service?.state}"
+            refreshRemoteRelayStatus()
             updateSafetyControls()
         }
 
@@ -131,6 +137,15 @@ class MainActivity : Activity() {
             setSingleLine(false)
             minLines = 2
         }
+        remoteUrlInput = EditText(this).apply {
+            hint = "wss://your-worker.example/ws"
+            setSingleLine(true)
+        }
+        remoteTokenInput = EditText(this).apply {
+            hint = "Relay token (>=32 chars)"
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
 
         connectButton = Button(this).apply {
             text = "Connect / QR"
@@ -150,6 +165,10 @@ class MainActivity : Activity() {
         sendButton = Button(this).apply {
             text = "Send"
             setOnClickListener { sendMessage() }
+        }
+        remoteRelayButton = Button(this).apply {
+            text = "Remote Trigger: OFF"
+            setOnClickListener { toggleRemoteRelay() }
         }
         disconnectButton = Button(this).apply {
             text = "Disconnect"
@@ -211,6 +230,9 @@ class MainActivity : Activity() {
             addView(contacts)
             addView(messageInput)
             addView(sendButton)
+            addView(remoteUrlInput)
+            addView(remoteTokenInput)
+            addView(remoteRelayButton)
             addView(disconnectButton)
             addView(exportTraceButton)
             addView(clear)
@@ -262,6 +284,10 @@ class MainActivity : Activity() {
                 appendConversation(
                     "FAILED ${shortClientMsgId(clientMsgId)} ${payload.optString("error_code")}: ${payload.optString("error")}"
                 )
+            }
+            "remote_relay_started", "remote_relay_connected", "remote_relay_disconnected", "remote_relay_stopped", "remote_relay_error" -> {
+                appendConversation("$eventType $payloadJson")
+                refreshRemoteRelayStatus()
             }
             "error" -> appendConversation("$eventType $payloadJson")
         }
@@ -438,6 +464,50 @@ class MainActivity : Activity() {
         }, UI_SEND_TIMEOUT_MS)
     }
 
+    private fun toggleRemoteRelay() {
+        val bridge = service ?: return
+        if (remoteRelayEnabled) {
+            runBridgeCall(onSuccess = {
+                remoteRelayEnabled = false
+                remoteRelayButton.text = "Remote Trigger: OFF"
+                updateSafetyControls()
+            }) { bridge.stopRemoteRelay() }
+            return
+        }
+        val wsUrl = remoteUrlInput.text.toString().trim()
+        val token = remoteTokenInput.text.toString().trim()
+        if (!wsUrl.startsWith("wss://") || !wsUrl.endsWith("/ws")) {
+            status.text = "Remote URL must be wss://.../ws"
+            return
+        }
+        if (token.length < MIN_RELAY_TOKEN_LENGTH) {
+            status.text = "Relay token must be at least $MIN_RELAY_TOKEN_LENGTH chars"
+            return
+        }
+        runBridgeCall(onSuccess = {
+            remoteRelayEnabled = true
+            remoteRelayButton.text = "Remote Trigger: ON"
+            updateSafetyControls()
+        }) { bridge.startRemoteRelay(wsUrl, token) }
+    }
+
+    private fun refreshRemoteRelayStatus() {
+        val bridge = service ?: return
+        Thread {
+            val payload = runCatching { bridge.remoteRelayStatus }.getOrDefault("{}")
+            val json = runCatching { JSONObject(payload) }.getOrDefault(JSONObject())
+            mainHandler.post {
+                remoteRelayEnabled = json.optBoolean("enabled", false)
+                val connected = json.optBoolean("connected", false)
+                remoteRelayButton.text = if (remoteRelayEnabled) {
+                    if (connected) "Remote Trigger: ON" else "Remote Trigger: CONNECTING"
+                } else {
+                    "Remote Trigger: OFF"
+                }
+            }
+        }.start()
+    }
+
     private fun exportTrace() {
         val path = filesDir.resolve("wa-trace.json").absolutePath
         runBridgeCall {
@@ -454,12 +524,15 @@ class MainActivity : Activity() {
         contactItems.clear()
         groupItems.clear()
         sendInProgress = false
+        remoteRelayEnabled = false
         pendingSends.clear()
         contacts.adapter = null
         conversation.text = ""
         qrImage.setImageDrawable(null)
         qrPayload.text = ""
         messageInput.setText("")
+        remoteTokenInput.setText("")
+        remoteRelayButton.text = "Remote Trigger: OFF"
         status.text = "Session cleared"
     }
 
@@ -496,6 +569,7 @@ class MainActivity : Activity() {
                 contactsButton.isEnabled = !riskStopped && contactsWait <= 0 && operationWait <= 0
                 groupsButton.isEnabled = !riskStopped && operationWait <= 0
                 sendButton.isEnabled = !riskStopped && sendWait <= 0 && operationWait <= 0 && pendingSends.isEmpty() && !sendInProgress
+                remoteRelayButton.isEnabled = !riskStopped
                 mainHandler.removeCallbacks(safetyRefreshRunnable)
                 if (nextWait > 0) {
                     val delayMs = ((nextWait.coerceAtMost(60) + 1) * 1000L)
@@ -563,5 +637,6 @@ class MainActivity : Activity() {
     companion object {
         private const val UI_SEND_TIMEOUT_MS = 75_000L
         private const val MAX_MULTI_RECIPIENTS = 3
+        private const val MIN_RELAY_TOKEN_LENGTH = 32
     }
 }
