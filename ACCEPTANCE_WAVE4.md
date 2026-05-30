@@ -30,6 +30,9 @@
 - [ ] 群列表仍为单选。
 - [ ] 可获取当前登录账号身份：至少能拿到 `UserIDString()` / self JID 与当前连接状态。
 - [ ] `GetState() == connected` 时，文档语义明确为“本机持有 self JID 对应账号的可用 linked-device session”。
+- [ ] 业务相关 whatsmeow 能力优先通过常规 Go wrapper / AIDL 方法暴露。
+- [ ] `InvokeAPI(name, inputJSON)` 不是本波必需项；如果后续保留，只能作为调试辅助入口，不能成为唯一业务入口。
+- [ ] 新增常规 API 仍遵守 gomobile 类型约束：复杂入参/返回值用 JSON string，不外泄 whatsmeow 内部类型。
 
 ## Phase 6B：MVP Research Raw Trace / Debug
 
@@ -47,6 +50,7 @@
 - [ ] 文档明确本波不做 Cloudflare / VPS / 远程触发 / Web 控制台。
 - [ ] reviewer 能从文档判断项目定位为“whatsmeow Android 接口研究”。
 - [ ] reviewer 能从文档判断：3 人上限移除和 trace 原始导出是有意需求，不是安全回归。
+- [ ] reviewer 能从文档判断：业务 API 不要求通过动态 `InvokeAPI` 暴露，常规方法是首选。
 
 ## 最终判定
 

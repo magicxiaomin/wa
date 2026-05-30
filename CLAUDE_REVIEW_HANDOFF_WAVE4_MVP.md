@@ -57,6 +57,32 @@ The following are intentional and should not be flagged as regressions:
    - session/auth/device store debug material
 6. `UserIDString()` / self JID is treated as the current WhatsApp account ID in the whatsmeow session.
 7. `self JID + GetState() == connected` is treated as local proof that this device currently holds a valid linked-device session for that account.
+8. Business whatsmeow APIs should be exposed as regular Go wrapper and AIDL methods first. A dynamic `InvokeAPI(name, inputJSON)` entry point is not required for Wave 4 and must not be the only way to access core business APIs.
+
+## API Exposure Review Notes
+
+Prefer explicit APIs such as:
+
+- `GetSelfIdentity()`
+- `GetContacts()`
+- `GetGroups()`
+- `GetUserInfo(jidsJson)`
+- `GetProfilePictureInfo(jid)`
+- `SendText(to, text, clientMsgId)`
+- `SendTextMulti(toJidsJson, text, clientMsgId)`
+- `MarkRead(chatJid, messageIdsJson, senderJid)`
+- `SendPresence(state)`
+- `SubscribePresence(jid)`
+- `ExportTrace(path)`
+- `ExportSessionDebug(path)`
+
+Complex inputs and outputs should still use JSON strings to satisfy gomobile/AIDL constraints.
+
+If `InvokeAPI(name, inputJSON)` appears later, review it as a development/debug helper only:
+
+- It is not required for this wave.
+- It should not hide business capabilities that are absent from explicit wrapper/AIDL APIs.
+- It should not bypass local-only scope, raw-trace rules, panic recovery, or Android callback threading requirements.
 
 ## What Should Still Be Flagged
 
@@ -68,6 +94,7 @@ Please flag any of the following:
 - Any multi-account or multi-phone orchestration.
 - Any hidden background mass-send flow not initiated locally from the Android UI.
 - Any gomobile-exported API that leaks Go internal complex types directly instead of JSON/string/int/bool/[]byte-compatible values.
+- Any core business capability exposed only through a dynamic string dispatcher without an explicit wrapper/AIDL method.
 - Any Android callback path that updates UI off the main Looper.
 - Any exported Go method or event goroutine without panic recovery.
 

@@ -130,9 +130,58 @@ issue 附件、review 附件或对外证明材料。
   - 研究模式导出当前 trace、session db 文件信息、device store / credential 调试信息。
   - 只写本地私有目录，不做网络上传。
 
+## 6. 业务 API 暴露方式
+
+Wave 4 的业务相关 whatsmeow 能力应优先通过常规 wrapper / AIDL 方法暴露，而不是只通过
+`InvokeAPI(name, inputJSON)` 这种动态入口暴露。
+
+原因：
+
+- 常规方法更容易被 Claude / reviewer 静态审计。
+- Android UI 调用链更清楚，不需要通过字符串分发隐藏能力边界。
+- gomobile 类型约束仍然可以满足：导出签名只使用 `string`、`int`、`bool`、`[]byte` 等基础类型，复杂入参和返回值继续用 JSON string。
+- 每个业务能力可以单独测试、单独加 UI 按钮、单独记录验收结果。
+
+推荐形态：
+
+```go
+GetSelfIdentity() (string, error)
+GetContacts() (string, error)
+GetGroups() (string, error)
+GetUserInfo(jidsJson string) (string, error)
+GetProfilePictureInfo(jid string) (string, error)
+SendText(to string, text string, clientMsgId string) error
+SendTextMulti(toJidsJson string, text string, clientMsgId string) (string, error)
+MarkRead(chatJid string, messageIdsJson string, senderJid string) error
+SendPresence(state string) error
+SubscribePresence(jid string) error
+ExportTrace(path string) error
+ExportSessionDebug(path string) error
+```
+
+AIDL 侧也应保持同名或近似同名的常规方法，例如：
+
+```aidl
+String getSelfIdentity();
+String getContacts();
+String getGroups();
+String getUserInfo(String jidsJson);
+String getProfilePictureInfo(String jid);
+void sendText(String to, String text, String clientMsgId);
+String sendTextMulti(String toJidsJson, String text, String clientMsgId);
+void markRead(String chatJid, String messageIdsJson, String senderJid);
+void sendPresence(String state);
+void subscribePresence(String jid);
+void exportTrace(String path);
+void exportSessionDebug(String path);
+```
+
+`InvokeAPI(name, inputJSON)` 如果后续保留，只能作为开发调试/实验台辅助入口，不作为核心业务 API 的唯一入口。
+当前 Wave 4 审计不要求实现 `InvokeAPI`。
+
 ---
 
-## 6. Phase 划分
+## 7. Phase 划分
 
 ### Phase 5：去云端化
 
@@ -154,6 +203,7 @@ issue 附件、review 附件或对外证明材料。
 - 增加或整理身份验证入口：
   - `GetSelfIdentity`
   - 可选 `ExportSessionDebug`
+- 后续新增 whatsmeow 业务能力时，优先新增常规 Go wrapper 方法和对应 AIDL 方法；不要求通过 `InvokeAPI` 暴露。
 - UI 保持简单，不做产品化聊天体验。
 - 确认 UI 侧不再限制 3 人。
 - 确认 `SendTextMulti` 结果返回完整 `jid` 和错误原文，方便研究。
@@ -167,7 +217,7 @@ issue 附件、review 附件或对外证明材料。
 
 ---
 
-## 7. 验收要求
+## 8. 验收要求
 
 - 代码中不存在 `edge/` 云端实现。
 - Android UI 中不存在 Remote Trigger 开关、URL 输入、token 输入。
@@ -176,13 +226,14 @@ issue 附件、review 附件或对外证明材料。
 - Android UI 不再限制联系人多选最多 3 个。
 - Go wrapper 不再把 `SendTextMulti` 返回结果脱敏成后四位。
 - `TRACE_SCHEMA.md` 明确 MVP research raw trace/debug 会包含敏感研究材料。
+- 业务 API 暴露方式以常规 wrapper / AIDL 方法为主，`InvokeAPI` 不是必需项，也不能成为唯一业务入口。
 - 本地 Android build 通过。
 - Go wrapper 单测通过。
 - 现有 Wave 3 本地能力不被破坏。
 
 ---
 
-## 8. 配套文档
+## 9. 配套文档
 
 - `ACCEPTANCE_WAVE4.md`
 - `SPEC_WAVE3.md`
