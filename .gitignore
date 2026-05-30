@@ -9,4 +9,3 @@ android/app/build/
 android/build/
 outputs/
 *.log
-edge/node_modules/
