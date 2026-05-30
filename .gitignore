@@ -6,6 +6,10 @@ trace.json
 android/.gradle/
 android/.kotlin/
 android/app/build/
+android/sample-app/build/
+android/wa-sdk/build/
+android/wa-sdk/libs/wamobile-sources.jar
+android/wa-sdk/libs/wamobile.aar
 android/build/
 outputs/
 *.log

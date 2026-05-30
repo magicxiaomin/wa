@@ -103,6 +103,13 @@ type waAdapter interface {
 	SendText(context.Context, string, string, string) (sendTextResult, error)
 	GetContacts(context.Context) ([]contactInfo, error)
 	GetGroups(context.Context) ([]groupInfo, error)
+	GetUserInfo(context.Context, []string) ([]userInfoResult, error)
+	GetProfilePictureInfo(context.Context, string) (profilePictureResult, error)
+	MarkRead(context.Context, string, []string, string) error
+	SendPresence(context.Context, string) error
+	SubscribePresence(context.Context, string) error
+	IsLoggedIn() bool
+	IsConnected() bool
 	ResolveJID(context.Context, string) (string, error)
 	Disconnect()
 	Close() error
@@ -139,6 +146,53 @@ type groupInfo struct {
 	JID              string `json:"jid"`
 	Name             string `json:"name"`
 	ParticipantCount int    `json:"participant_count"`
+}
+
+type selfIdentityInfo struct {
+	SelfJID      string `json:"self_jid"`
+	JIDServer    string `json:"jid_server"`
+	State        string `json:"state"`
+	IsLoggedIn   bool   `json:"is_logged_in"`
+	IsConnected  bool   `json:"is_connected"`
+	HasSessionDB bool   `json:"has_session_db"`
+	DeviceName   string `json:"device_name"`
+}
+
+type userInfoResult struct {
+	JID          string   `json:"jid"`
+	Found        bool     `json:"found"`
+	VerifiedName string   `json:"verified_name,omitempty"`
+	Status       string   `json:"status,omitempty"`
+	PictureID    string   `json:"picture_id,omitempty"`
+	LID          string   `json:"lid,omitempty"`
+	Devices      []string `json:"devices,omitempty"`
+	Error        string   `json:"error,omitempty"`
+}
+
+type profilePictureResult struct {
+	JID        string `json:"jid"`
+	Found      bool   `json:"found"`
+	URL        string `json:"url,omitempty"`
+	ID         string `json:"id,omitempty"`
+	Type       string `json:"type,omitempty"`
+	DirectPath string `json:"direct_path,omitempty"`
+	Hash       string `json:"hash,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
+type sessionDebugInfo struct {
+	SelfJID     string         `json:"self_jid"`
+	State       string         `json:"state"`
+	IsLoggedIn  bool           `json:"is_logged_in"`
+	IsConnected bool           `json:"is_connected"`
+	DeviceName  string         `json:"device_name"`
+	DataDir     string         `json:"data_dir"`
+	SessionDB   map[string]any `json:"session_db"`
+	FreshLinked string         `json:"fresh_linked_at,omitempty"`
+	RiskUntil   string         `json:"risk_until,omitempty"`
+	RiskReason  string         `json:"risk_reason,omitempty"`
+	TracePath   string         `json:"trace_path"`
+	ExportedAt  string         `json:"exported_at"`
 }
 
 type persistedRiskStop struct {
@@ -552,6 +606,166 @@ func (c *Client) GetGroups() (groupsJSON string, err error) {
 	return string(b), nil
 }
 
+func (c *Client) GetSelfIdentity() (identityJSON string, err error) {
+	defer c.recoverAsError("GetSelfIdentity", &err)
+
+	c.mu.Lock()
+	adapter := c.wa
+	state := c.state
+	deviceName := c.deviceName
+	dataDir := c.dataDir
+	c.mu.Unlock()
+
+	selfJID := ""
+	isLoggedIn := false
+	isConnected := false
+	if adapter != nil {
+		selfJID = adapter.UserIDString()
+		isLoggedIn = adapter.IsLoggedIn()
+		isConnected = adapter.IsConnected()
+	}
+	info := selfIdentityInfo{
+		SelfJID:      selfJID,
+		JIDServer:    jidServer(selfJID),
+		State:        state,
+		IsLoggedIn:   isLoggedIn,
+		IsConnected:  isConnected,
+		HasSessionDB: fileExists(filepath.Join(dataDir, "whatsmeow.db")),
+		DeviceName:   deviceName,
+	}
+	return mustJSON(info), nil
+}
+
+func (c *Client) GetUserInfo(jidsJSON string) (resultsJSON string, err error) {
+	defer c.recoverAsError("GetUserInfo", &err)
+
+	var jids []string
+	if err := json.Unmarshal([]byte(jidsJSON), &jids); err != nil {
+		return "", fmt.Errorf("jidsJson must be a JSON array: %w", err)
+	}
+	targets := compactStrings(jids)
+	if len(targets) == 0 {
+		return "", errors.New("at least one jid is required")
+	}
+	adapter, err := c.queryAdapter("get user info")
+	if err != nil {
+		return "", err
+	}
+	results, err := adapter.GetUserInfo(context.Background(), targets)
+	if err != nil {
+		return "", err
+	}
+	if results == nil {
+		results = []userInfoResult{}
+	}
+	return mustJSON(results), nil
+}
+
+func (c *Client) GetProfilePictureInfo(jid string) (pictureJSON string, err error) {
+	defer c.recoverAsError("GetProfilePictureInfo", &err)
+
+	target := strings.TrimSpace(jid)
+	if target == "" {
+		return "", errors.New("jid is required")
+	}
+	adapter, err := c.queryAdapter("get profile picture")
+	if err != nil {
+		return "", err
+	}
+	result, err := adapter.GetProfilePictureInfo(context.Background(), target)
+	if err != nil {
+		return "", err
+	}
+	return mustJSON(result), nil
+}
+
+func (c *Client) MarkRead(chatJid string, messageIdsJSON string, senderJid string) (err error) {
+	defer c.recoverAsError("MarkRead", &err)
+
+	var ids []string
+	if err := json.Unmarshal([]byte(messageIdsJSON), &ids); err != nil {
+		return fmt.Errorf("messageIdsJson must be a JSON array: %w", err)
+	}
+	ids = compactStrings(ids)
+	if strings.TrimSpace(chatJid) == "" {
+		return errors.New("chatJid is required")
+	}
+	if len(ids) == 0 {
+		return errors.New("at least one message id is required")
+	}
+	adapter, err := c.queryAdapter("mark read")
+	if err != nil {
+		return err
+	}
+	if err := adapter.MarkRead(context.Background(), strings.TrimSpace(chatJid), ids, strings.TrimSpace(senderJid)); err != nil {
+		c.emit("mark_read_failed", map[string]any{
+			"chat_jid": chatJid,
+			"error":    err.Error(),
+		}, map[string]any{
+			"chat_jid": chatJid,
+			"error":    err.Error(),
+		})
+		return err
+	}
+	c.emit("mark_read_success", map[string]any{
+		"chat_jid":      chatJid,
+		"message_count": len(ids),
+		"sender_jid":    strings.TrimSpace(senderJid),
+		"message_ids":   ids,
+		"completed_at":  time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+	}, map[string]any{
+		"chat_jid":      chatJid,
+		"message_count": len(ids),
+		"sender_jid":    strings.TrimSpace(senderJid),
+		"message_ids":   ids,
+	})
+	return nil
+}
+
+func (c *Client) SendPresence(state string) (err error) {
+	defer c.recoverAsError("SendPresence", &err)
+
+	state = strings.TrimSpace(state)
+	if state != "available" && state != "unavailable" {
+		return fmt.Errorf("presence state must be %q or %q", "available", "unavailable")
+	}
+	adapter, err := c.queryAdapter("send presence")
+	if err != nil {
+		return err
+	}
+	if err := adapter.SendPresence(context.Background(), state); err != nil {
+		return err
+	}
+	c.emit("presence_sent", map[string]any{
+		"state": state,
+	}, map[string]any{
+		"state": state,
+	})
+	return nil
+}
+
+func (c *Client) SubscribePresence(jid string) (err error) {
+	defer c.recoverAsError("SubscribePresence", &err)
+
+	target := strings.TrimSpace(jid)
+	if target == "" {
+		return errors.New("jid is required")
+	}
+	adapter, err := c.queryAdapter("subscribe presence")
+	if err != nil {
+		return err
+	}
+	if err := adapter.SubscribePresence(context.Background(), target); err != nil {
+		return err
+	}
+	c.emit("presence_subscribed", map[string]any{
+		"jid": target,
+	}, map[string]any{
+		"jid": target,
+	})
+	return nil
+}
+
 func (c *Client) ResolveJID(to string) (jid string, err error) {
 	defer c.recoverAsError("ResolveJID", &err)
 
@@ -579,6 +793,25 @@ func (c *Client) ResolveJID(to string) (jid string, err error) {
 	return adapter.ResolveJID(context.Background(), strings.TrimSpace(to))
 }
 
+func (c *Client) queryAdapter(operation string) (waAdapter, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if remaining := c.riskRemainingLocked(); remaining > 0 {
+		return nil, riskStoppedError(c.riskReason, remaining)
+	}
+	if remaining := c.activeOperationRemainingLocked(); remaining > 0 {
+		return nil, activeOperationCooldownError(operation, remaining)
+	}
+	if c.state != StateConnected {
+		return nil, fmt.Errorf("client state is %q, want %q", c.state, StateConnected)
+	}
+	if c.wa == nil {
+		return nil, errors.New("whatsmeow adapter is not initialized")
+	}
+	c.reserveActiveOperationLocked()
+	return c.wa, nil
+}
+
 func (c *Client) SafetyStatus() (statusJSON string, err error) {
 	defer c.recoverAsError("SafetyStatus", &err)
 	return mustJSON(c.safetyStatus()), nil
@@ -587,6 +820,69 @@ func (c *Client) SafetyStatus() (statusJSON string, err error) {
 func (c *Client) ExportTrace(path string) (err error) {
 	defer c.recoverAsError("ExportTrace", &err)
 	return c.trace.export(path)
+}
+
+func (c *Client) ExportSessionDebug(path string) (err error) {
+	defer c.recoverAsError("ExportSessionDebug", &err)
+
+	target := strings.TrimSpace(path)
+	if target == "" {
+		return errors.New("path is required")
+	}
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		return err
+	}
+	tracePath := filepath.Join(target, "trace.json")
+	if err := c.trace.export(tracePath); err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	adapter := c.wa
+	state := c.state
+	deviceName := c.deviceName
+	dataDir := c.dataDir
+	freshLinkedAt := c.freshLinkedAt
+	riskUntil := c.riskUntil
+	riskReason := c.riskReason
+	c.mu.Unlock()
+
+	selfJID := ""
+	isLoggedIn := false
+	isConnected := false
+	if adapter != nil {
+		selfJID = adapter.UserIDString()
+		isLoggedIn = adapter.IsLoggedIn()
+		isConnected = adapter.IsConnected()
+	}
+	dbPath := filepath.Join(dataDir, "whatsmeow.db")
+	debug := sessionDebugInfo{
+		SelfJID:     selfJID,
+		State:       state,
+		IsLoggedIn:  isLoggedIn,
+		IsConnected: isConnected,
+		DeviceName:  deviceName,
+		DataDir:     filepath.Clean(dataDir),
+		SessionDB: map[string]any{
+			"path":   filepath.Clean(dbPath),
+			"exists": fileExists(dbPath),
+			"size":   fileSize(dbPath),
+		},
+		TracePath:  tracePath,
+		ExportedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+	}
+	if !freshLinkedAt.IsZero() {
+		debug.FreshLinked = freshLinkedAt.UTC().Format(time.RFC3339Nano)
+	}
+	if !riskUntil.IsZero() {
+		debug.RiskUntil = riskUntil.UTC().Format(time.RFC3339Nano)
+		debug.RiskReason = riskReason
+	}
+	b, err := json.MarshalIndent(debug, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(target, "session-debug.json"), b, 0o600)
 }
 
 func (c *Client) ClearSession() (err error) {
@@ -729,6 +1025,22 @@ func (c *Client) handleWAEvent(evt any) {
 		c.handleReceipt(v)
 	case *events.Message:
 		c.handleMessage(v)
+	case *events.Presence:
+		lastSeen := ""
+		if !v.LastSeen.IsZero() {
+			lastSeen = v.LastSeen.UTC().Format("2006-01-02T15:04:05.000Z")
+		}
+		state := "available"
+		if v.Unavailable {
+			state = "unavailable"
+		}
+		payload := map[string]any{
+			"jid":         v.From.String(),
+			"state":       state,
+			"unavailable": v.Unavailable,
+			"last_seen":   lastSeen,
+		}
+		c.emit("presence_update", payload, payload)
 	case *events.Contact, *events.PushName, *events.BusinessName:
 		c.emit(EventContactsSynced, map[string]any{}, map[string]any{})
 	}
@@ -1156,6 +1468,37 @@ func recipientSuffix(recipient string) string {
 		return jidSuffix(recipient)
 	}
 	return maskedPhone(normalizePhone(recipient))
+}
+
+func jidServer(jid string) string {
+	if at := strings.LastIndexByte(jid, '@'); at >= 0 && at < len(jid)-1 {
+		return jid[at+1:]
+	}
+	return ""
+}
+
+func compactStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func fileSize(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return info.Size()
 }
 
 func sendRoutePayload(result sendTextResult) map[string]any {

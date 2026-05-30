@@ -3,12 +3,14 @@ package bridge
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -176,6 +178,125 @@ func (a *whatsmeowAdapter) ResolveJID(ctx context.Context, to string) (string, e
 		return "", err
 	}
 	return jid.String(), nil
+}
+
+func (a *whatsmeowAdapter) GetUserInfo(ctx context.Context, jidStrings []string) ([]userInfoResult, error) {
+	jids := make([]types.JID, 0, len(jidStrings))
+	inputByJID := make(map[string]string, len(jidStrings))
+	results := make([]userInfoResult, 0, len(jidStrings))
+	for _, jidString := range jidStrings {
+		jid, err := a.resolveJID(ctx, jidString)
+		if err != nil {
+			results = append(results, userInfoResult{JID: jidString, Found: false, Error: err.Error()})
+			continue
+		}
+		jids = append(jids, jid)
+		inputByJID[jid.String()] = jidString
+	}
+	if len(jids) == 0 {
+		return results, nil
+	}
+	infoByJID, err := a.client.GetUserInfo(ctx, jids)
+	if err != nil {
+		return nil, err
+	}
+	for _, jid := range jids {
+		info, ok := infoByJID[jid]
+		item := userInfoResult{
+			JID:   jid.String(),
+			Found: ok,
+		}
+		if !ok {
+			if input := inputByJID[jid.String()]; input != "" {
+				item.JID = input
+			}
+			results = append(results, item)
+			continue
+		}
+		item.Status = info.Status
+		item.PictureID = info.PictureID
+		if !info.LID.IsEmpty() {
+			item.LID = info.LID.String()
+		}
+		if info.VerifiedName != nil && info.VerifiedName.Details != nil {
+			item.VerifiedName = info.VerifiedName.Details.GetVerifiedName()
+		}
+		for _, device := range info.Devices {
+			item.Devices = append(item.Devices, device.String())
+		}
+		results = append(results, item)
+	}
+	return results, nil
+}
+
+func (a *whatsmeowAdapter) GetProfilePictureInfo(ctx context.Context, jidString string) (profilePictureResult, error) {
+	jid, err := a.resolveJID(ctx, jidString)
+	if err != nil {
+		return profilePictureResult{JID: jidString, Found: false, Error: err.Error()}, nil
+	}
+	info, err := a.client.GetProfilePictureInfo(ctx, jid, nil)
+	if err != nil {
+		return profilePictureResult{JID: jid.String(), Found: false, Error: err.Error()}, nil
+	}
+	if info == nil {
+		return profilePictureResult{JID: jid.String(), Found: false, Error: "profile picture has not changed or is not available"}, nil
+	}
+	return profilePictureResult{
+		JID:        jid.String(),
+		Found:      true,
+		URL:        info.URL,
+		ID:         info.ID,
+		Type:       info.Type,
+		DirectPath: info.DirectPath,
+		Hash:       base64.StdEncoding.EncodeToString(info.Hash),
+	}, nil
+}
+
+func (a *whatsmeowAdapter) MarkRead(ctx context.Context, chatString string, ids []string, senderString string) error {
+	chat, err := a.resolveJID(ctx, chatString)
+	if err != nil {
+		return err
+	}
+	sender := types.EmptyJID
+	if strings.TrimSpace(senderString) != "" {
+		sender, err = a.resolveJID(ctx, senderString)
+		if err != nil {
+			return err
+		}
+	}
+	messageIDs := make([]types.MessageID, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			messageIDs = append(messageIDs, types.MessageID(id))
+		}
+	}
+	return a.client.MarkRead(ctx, messageIDs, time.Now(), chat, sender)
+}
+
+func (a *whatsmeowAdapter) SendPresence(ctx context.Context, state string) error {
+	switch state {
+	case string(types.PresenceAvailable), string(types.PresenceUnavailable):
+		return a.client.SendPresence(ctx, types.Presence(state))
+	default:
+		return fmt.Errorf("presence state must be %q or %q", types.PresenceAvailable, types.PresenceUnavailable)
+	}
+}
+
+func (a *whatsmeowAdapter) SubscribePresence(ctx context.Context, jidString string) error {
+	jid, err := a.resolveJID(ctx, jidString)
+	if err != nil {
+		return err
+	}
+	return a.client.SubscribePresence(ctx, jid)
+}
+
+func (a *whatsmeowAdapter) IsLoggedIn() bool {
+	return a.client != nil && a.client.IsLoggedIn()
+}
+
+func (a *whatsmeowAdapter) IsConnected() bool {
+	return a.client != nil && a.client.IsConnected()
 }
 
 func (a *whatsmeowAdapter) resolveJID(ctx context.Context, to string) (types.JID, error) {

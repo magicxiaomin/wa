@@ -1,0 +1,5 @@
+<resources>
+    <string name="wa_sdk_notification_channel">WA Bridge</string>
+    <string name="wa_sdk_notification_title">WA Bridge</string>
+    <string name="wa_sdk_notification_text">Bridge process is running</string>
+</resources>
