@@ -1,45 +1,43 @@
-# ACCEPTANCE_WAVE4 · 第四波验收（远程触发，单手机，Cloudflare Workers + Durable Objects）
+# ACCEPTANCE_WAVE4 · 第四波验收（Android whatsmeow 接口研究 · 去云端）
 
-> 设计以 `SPEC_WAVE4.md` 为准（取代 `PRD_WAVE3_WAVE4.md` 旧 VPS 版 Wave 4）。
-> 本波改为一次性实现 Phase 5/6/7 全部阶段后再统一 review，不逐阶段汇报。
+> 设计以 `SPEC_WAVE4.md` 为准。本波移除 Cloudflare / 远程触发，项目回到单手机 Android 本地接口研究。
 
-## Phase 5：边缘 relay（Worker + Durable Object）
-- [ ] 无 token / 错 token → 401
-- [ ] `/send` 收件人 >3 → 400；任一为 `@g.us` → 400（冗余防线）
-- [ ] 超过 10 次/分钟 → 429
-- [ ] 手机 WS 未连接 → 503
-- [ ] 手机不回 → 超时 504，且 map 中关联条目被清除（无残留、不重投）
-- [ ] 正常路径：mock 手机 WS 回成功 → 200，返回逐个收件人结果
-- [ ] token 为空或长度 <32 → 部署/启动拒绝并报错
-- [ ] 代码审查：DO 未使用持久存储 / Queues / KV / D1 / Cron（只用内存 + WS）
-- [ ] 边缘日志不含 token 明文 / 完整号码 / 消息正文
-- [ ] `wrangler` 配置 + `edge/README.md`（设 secret、部署、配 Pages、配域名）齐全
-- [ ] 提供 mock 手机 WS client，使 Phase 5 可独立端到端验收
+## Phase 5：去云端化
 
-## Phase 6：手机端 WS 客户端
-- [ ] 手机启动后主动连 `wss://域名/ws`，token 鉴权成功
-- [ ] 断线自动重连（指数退避）
-- [ ] 收到 `send` 指令 → 调 `SendTextMulti` → 回结果（带 `request_id`）
-- [ ] 收到 `contacts` 指令 → 调 `GetContacts` → 回结果（带 `request_id`）
-- [ ] 即使边缘漏过，>3 人指令仍被 wrapper 硬拒
-- [ ] 节流 / risk-stop / 发送计数仍生效（远程触发不绕过任何一条）
-- [ ] UI 有开关可启停"远程触发"；关掉后手机不连边缘
-- [ ] 只连一个 DO、只承载一个账号；手机不开任何监听端口
+- [ ] 仓库中不存在 `edge/` Cloudflare Worker / Pages / mock phone 实现。
+- [ ] Go wrapper 中不存在 Remote Relay WS client。
+- [ ] Android AIDL 中不存在 `startRemoteRelay` / `stopRemoteRelay` / `getRemoteRelayStatus`。
+- [ ] Android UI 中不存在 Remote Trigger 开关、URL 输入、token 输入。
+- [ ] `TRACE_SCHEMA.md` 中不存在远程 relay 事件字段。
+- [ ] `go.mod` 不再因远程 relay 引入额外 websocket 依赖。
 
-## Phase 7：前端 + 真机端到端
-- [ ] 页面：输 token → 拉取联系人 → 多选（最多 3，选满其余置灰）→ 输文本 → 发送 → 显示逐个结果
-- [ ] UI 的 ≤3 限制与 wrapper 的硬上限是双层保险
-- [ ] 真机：浏览器远程触发 → 选 2-3 联系人 → 他们都收到
-- [ ] 手机离线时触发 → 页面显示明确"手机离线"错误，不补发、不排队
-- [ ] trace / 边缘日志脱敏复核：无正文 / 全号码 / token / session key
-- [ ] 全程 3 人上限 / 节流 / risk-stop 生效
+## Phase 6：Android 本地接口研究
+
+- [ ] `GetContacts` 本地入口保留。
+- [ ] `GetGroups` 本地入口保留。
+- [ ] `SendText` 本地 1:1 文本发送入口保留。
+- [ ] `SendTextMulti` 本地 1-3 联系人发送入口保留。
+- [ ] 本地发到 1 个群入口保留。
+- [ ] `ExportTrace` / `SafetyStatus` 保留。
+- [ ] UI 联系人多选最多 3 个，选满后拒绝继续选择。
+- [ ] 群列表仍为单选。
+
+## Phase 7：构建与文档
+
+- [ ] `go test ./bridge` 通过。
+- [ ] `./android/build_debug_go126.sh` 通过。
+- [ ] 文档明确本波不做 Cloudflare / VPS / 远程触发 / Web 控制台。
+- [ ] reviewer 能从文档判断项目定位为“whatsmeow Android 接口研究”。
 
 ## 最终判定
-- [ ] 真机上能从网页远程触发、发给 ≤3 个联系人、送达
-- [ ] 超过 3 人被硬拒（账号安全保险）
-- [ ] 不发群（边缘无任何群发接口）、单账号、无队列/调度、无存储；手机离线即失败不补发
-- [ ] 范围守住：没有出现发群、多账号、定时/批量、边缘存任务等越界行为
+
+- [ ] 项目不包含任何云端 relay / 远程触发发送能力。
+- [ ] Android 本地 whatsmeow 接口研究能力保留。
+- [ ] 范围守住：无云端、无队列、无调度、无远程群发、无多账号。
+- [ ] 安全限制仍存在：UI 最多 3 人，wrapper 仍有 3 人硬上限、节流、risk-stop。
 
 ## 不阻塞通过的已知项
-- 多手机 / 多租户：本波只做单手机，延后
-- 收群消息、媒体消息：不在本波
+
+- 真机端到端送达可按需另行验证。
+- UI 仍是研究工具级别，不做产品化聊天体验。
+- 国产 ROM 后台限制、电量消耗、长时间保活仍是后续观察项。
