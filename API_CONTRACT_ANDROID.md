@@ -1,4 +1,8 @@
-# API_CONTRACT_ANDROID · 第二波接口扩展
+# API_CONTRACT_ANDROID · Android 接口扩展
+
+> 历史说明：本文最初来自第二波 Android 接口扩展。Wave 4 MVP research mode 已经改变 trace/debug
+> 语义：trace 可以记录完整 JID、完整号码、消息正文、QR/pairing code、session/auth 调试材料。
+> 当前审计以 `SPEC_WAVE4.md`、`ACCEPTANCE_WAVE4.md`、`TRACE_SCHEMA.md` 为准。
 
 延续第一波 API_CONTRACT，本波新增"收消息"和"取联系人"，并定义 Kotlin 侧如何对接。
 
@@ -21,9 +25,9 @@ ResolveJID(phone string) (string, error)
 
 接收相关：
 - `message_received` — 收到 1 对 1 文本消息。payload:
-  `{"from_jid":"...","from_suffix":"...3000","text_len":12,"server_msg_id":"...","ts":"..."}`
-  ⚠️ **注意**：trace 里不记 text 正文（脱敏），但**传给 UI 的实时回调里需要 text 内容**
-  （否则用户看不到消息）。所以区分两条路径：给 UI 的回调含正文，写 trace 的不含正文。
+  `{"from_jid":"...","from_suffix":"...3000","text":"...","text_len":12,"server_msg_id":"...","ts":"..."}`
+  Wave 4 MVP research mode 下，给 UI 的实时回调和导出的 trace/debug 都可以包含正文和完整 JID，
+  用于研究 whatsmeow Android 接口行为。该 trace/debug 只用于本机研究，不发布、不外发。
 - `contacts_synced` — 联系人同步完成/更新，UI 可重新拉取
 - `receipt` — 送达/已读回执（尽力记录）
 

@@ -1,5 +1,9 @@
 # wa · WhatsApp 本地 Bridge — PoC 阶段
 
+> 当前审计请以 `SPEC_WAVE4.md`、`ACCEPTANCE_WAVE4.md`、`TRACE_SCHEMA.md`、
+> `CLAUDE_REVIEW_HANDOFF_WAVE4_MVP.md` 为准。本文保留第一波 PoC 的历史说明。
+> Wave 4 MVP research mode 已经移除 3 人上限，并允许 raw trace/debug 记录完整业务字段和认证调试材料。
+
 > 本仓库当前处于**第一波：桌面 Go PoC**。目标是用最低成本验证
 > `whatsmeow` + 测试号能否连接、发消息、恢复 session —— 一票决定项目是否进入 Android 阶段。
 
@@ -13,7 +17,7 @@
 3. [`GOMOBILE_CONSTRAINTS.md`](./GOMOBILE_CONSTRAINTS.md) — 类型约束（PoC 就遵守，省后续返工）
 4. [`KNOWN_PITFALLS.md`](./KNOWN_PITFALLS.md) — 已知坑（**逐条对照**，项目特有知识）
 5. [`ACCEPTANCE.md`](./ACCEPTANCE.md) — 验收 checklist
-6. [`TRACE_SCHEMA.md`](./TRACE_SCHEMA.md) — trace 字段与脱敏要求
+6. [`TRACE_SCHEMA.md`](./TRACE_SCHEMA.md) — Wave 4 MVP research raw trace 字段要求
 
 启动指令见 [`00_如何使用.md`](./00_如何使用.md) 末尾的"可直接粘给 Codex 的启动 prompt"。
 

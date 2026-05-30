@@ -206,7 +206,7 @@ func TestJIDSuffixStripsDeviceIDBeforeMasking(t *testing.T) {
 	}
 }
 
-func TestSendTextForTestEmitsSentEventsAndRedactedTrace(t *testing.T) {
+func TestSendTextForTestEmitsSentEventsAndRawTrace(t *testing.T) {
 	events := newEventRecorder()
 	fake := newFakeWAAdapter()
 	fake.sendResult = sendTextResult{
@@ -226,18 +226,18 @@ func TestSendTextForTestEmitsSentEventsAndRedactedTrace(t *testing.T) {
 	}
 	c.setState(StateConnected)
 
-	const secretText = "this message body must never enter trace"
-	if err := c.SendTextForTest("15551234567", secretText, "client-1"); err != nil {
+	const messageText = "this message body is expected in research trace"
+	if err := c.SendTextForTest("15551234567", messageText, "client-1"); err != nil {
 		t.Fatalf("SendTextForTest() error = %v", err)
 	}
 
 	start := events.waitFor(t, EventMessageSendStart)
 	sent := events.waitFor(t, EventMessageSent)
-	if strings.Contains(start.payload, secretText) || strings.Contains(sent.payload, secretText) {
-		t.Fatalf("send event leaked message text: start=%s sent=%s", start.payload, sent.payload)
+	if !strings.Contains(start.payload, messageText) {
+		t.Fatalf("message_send_start missing raw message text: %s", start.payload)
 	}
-	if strings.Contains(start.payload, "15551234567") || strings.Contains(sent.payload, "15551234567") {
-		t.Fatalf("send event leaked full phone: start=%s sent=%s", start.payload, sent.payload)
+	if !strings.Contains(start.payload, "15551234567") || !strings.Contains(sent.payload, "15551234567") {
+		t.Fatalf("send events missing raw phone/JID: start=%s sent=%s", start.payload, sent.payload)
 	}
 	if !strings.Contains(sent.payload, "3EB0SERVERMSGID") {
 		t.Fatalf("message_sent missing server id: %s", sent.payload)
@@ -252,11 +252,11 @@ func TestSendTextForTestEmitsSentEventsAndRedactedTrace(t *testing.T) {
 		t.Fatalf("ReadFile(trace) error = %v", err)
 	}
 	trace := string(traceBytes)
-	if strings.Contains(trace, secretText) {
-		t.Fatalf("trace leaked message text: %s", trace)
+	if !strings.Contains(trace, messageText) {
+		t.Fatalf("trace missing raw message text: %s", trace)
 	}
-	if strings.Contains(trace, "15551234567") {
-		t.Fatalf("trace leaked full phone: %s", trace)
+	if !strings.Contains(trace, "15551234567") {
+		t.Fatalf("trace missing raw phone: %s", trace)
 	}
 }
 
@@ -451,8 +451,8 @@ func TestSendTextMultiSendsTwoAndThreeRecipients(t *testing.T) {
 				if result.ServerMessageID == "" {
 					t.Fatalf("result %d missing server_msg_id: %#v", i, result)
 				}
-				if result.JIDSuffix == "" || strings.Contains(result.JIDSuffix, "@") {
-					t.Fatalf("result %d has unsafe jid_suffix: %#v", i, result)
+				if result.JID != tc.targets[i] {
+					t.Fatalf("result %d JID = %q, want %q", i, result.JID, tc.targets[i])
 				}
 			}
 		})
@@ -513,8 +513,8 @@ func TestSendTextMultiAllowsGroupRecipientWhenCalledDirectly(t *testing.T) {
 	if fake.sendCalls != 2 {
 		t.Fatalf("SendTextMulti() calls = %d, want 2", fake.sendCalls)
 	}
-	if strings.Contains(got, "15550000001@s.whatsapp.net") || strings.Contains(got, "120363000000000000@g.us") {
-		t.Fatalf("SendTextMulti result leaked full JID: %s", got)
+	if !strings.Contains(got, "15550000001@s.whatsapp.net") || !strings.Contains(got, "120363000000000000@g.us") {
+		t.Fatalf("SendTextMulti result missing full JID: %s", got)
 	}
 }
 
@@ -582,7 +582,7 @@ func TestSendTextMultiContinuesAfterSingleRecipientFailure(t *testing.T) {
 	}
 }
 
-func TestSendTextMultiResultIsRedacted(t *testing.T) {
+func TestSendTextMultiResultIncludesRawResearchFields(t *testing.T) {
 	restore := overrideMultiSendTestTiming()
 	defer restore()
 
@@ -596,19 +596,19 @@ func TestSendTextMultiResultIsRedacted(t *testing.T) {
 	}
 	c := newStartedConnectedTestClient(t, events, fake)
 
-	got, err := c.SendTextMulti(`["15550000001@s.whatsapp.net","15550000002@s.whatsapp.net"]`, "secret body", "multi-redact")
+	got, err := c.SendTextMulti(`["15550000001@s.whatsapp.net","15550000002@s.whatsapp.net"]`, "secret body", "multi-raw")
 	if err != nil {
 		t.Fatalf("SendTextMulti() error = %v", err)
 	}
-	for _, forbidden := range []string{
+	for _, required := range []string{
 		"15550000001",
 		"15550000002",
 		"15550000001@s.whatsapp.net",
 		"15550000002@s.whatsapp.net",
 		"secret body",
 	} {
-		if strings.Contains(got, forbidden) {
-			t.Fatalf("SendTextMulti result leaked %q: %s", forbidden, got)
+		if !strings.Contains(got, required) {
+			t.Fatalf("SendTextMulti result missing %q: %s", required, got)
 		}
 	}
 }
@@ -758,7 +758,7 @@ func TestActiveOperationBackoffBlocksRapidCalls(t *testing.T) {
 	}
 }
 
-func TestIncomingOneToOneTextEmitsPayloadButTraceIsRedacted(t *testing.T) {
+func TestIncomingOneToOneTextEmitsPayloadAndRawTrace(t *testing.T) {
 	eventsRec := newEventRecorder()
 	fake := newFakeWAAdapter()
 
@@ -799,8 +799,8 @@ func TestIncomingOneToOneTextEmitsPayloadButTraceIsRedacted(t *testing.T) {
 		t.Fatalf("ReadFile(trace) error = %v", err)
 	}
 	trace := string(traceBytes)
-	if strings.Contains(trace, "visible only in realtime callback") || strings.Contains(trace, "15551234567") {
-		t.Fatalf("trace leaked received message details: %s", trace)
+	if !strings.Contains(trace, "visible only in realtime callback") || !strings.Contains(trace, "15551234567") {
+		t.Fatalf("trace missing received message details: %s", trace)
 	}
 }
 

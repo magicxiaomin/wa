@@ -1,5 +1,11 @@
 # Claude review handoff
 
+> Historical handoff for the Android second-wave PoC.
+>
+> For the current Wave 4 MVP research review, use `CLAUDE_REVIEW_HANDOFF_WAVE4_MVP.md`,
+> `SPEC_WAVE4.md`, `ACCEPTANCE_WAVE4.md`, and `TRACE_SCHEMA.md` instead.
+> Wave 4 intentionally removes the 3-recipient cap and trace redaction requirements.
+
 ## Review goal
 
 Audit the Android second-wave PoC for this repository:

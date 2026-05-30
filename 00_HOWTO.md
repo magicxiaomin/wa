@@ -1,5 +1,9 @@
 # 00_如何使用这个交接包（给你自己看）
 
+> 历史说明：本文是第一波桌面 Go PoC 的交接说明。当前 Wave 4 / Claude 审计请优先阅读
+> `SPEC_WAVE4.md`、`ACCEPTANCE_WAVE4.md`、`TRACE_SCHEMA.md`、`CLAUDE_REVIEW_HANDOFF_WAVE4_MVP.md`。
+> Wave 4 MVP research mode 已经移除 3 人上限，并允许 raw trace/debug 记录完整业务字段和认证调试材料。
+
 ## 这是什么
 这是交给 Codex 的**第一波**任务包，范围只有一个：桌面 Go PoC。
 目的：在投入任何 Android 工程前，用半天验证 whatsmeow + 你的号能不能连上、发消息、恢复 session。
@@ -10,7 +14,7 @@
 - `GOMOBILE_CONSTRAINTS.md` — 类型约束（PoC 就遵守，省后续返工）。
 - `KNOWN_PITFALLS.md` — 已知坑（最值钱，逐条对照）。
 - `ACCEPTANCE.md` — 验收 checklist。
-- `TRACE_SCHEMA.md` — trace 字段与脱敏。
+- `TRACE_SCHEMA.md` — Wave 4 MVP research raw trace 字段要求。
 
 ## 怎么交给 Codex
 1. 把整个 `codex-handoff-poc/` 目录作为上下文提供给 Codex。

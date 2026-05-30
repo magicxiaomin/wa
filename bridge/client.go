@@ -117,7 +117,7 @@ type sendTextResult struct {
 }
 
 type multiSendResult struct {
-	JIDSuffix       string `json:"jid_suffix"`
+	JID             string `json:"jid"`
 	OK              bool   `json:"ok"`
 	ServerMessageID string `json:"server_msg_id,omitempty"`
 	Error           string `json:"error,omitempty"`
@@ -380,13 +380,13 @@ func (c *Client) SendTextMulti(toJidsJson string, text string, clientMsgId strin
 		childClientMsgID := fmt.Sprintf("%s#%d", clientMsgId, i)
 		result, _, sendErr := c.sendOneText(adapter, target, text, childClientMsgID)
 		item := multiSendResult{
-			JIDSuffix: jidSuffix(target),
-			OK:        sendErr == nil,
+			JID: target,
+			OK:  sendErr == nil,
 		}
 		if sendErr == nil {
 			item.ServerMessageID = result.ServerMessageID
 		} else {
-			item.Error = sanitizeError(sendErr.Error(), target, normalizePhone(target), text)
+			item.Error = sendErr.Error()
 		}
 		results = append(results, item)
 		if i < len(trimmed)-1 {
@@ -431,8 +431,9 @@ func (c *Client) sendOneText(adapter waAdapter, target string, text string, clie
 	started := time.Now()
 	startPayload := map[string]any{
 		"clientMsgId": clientMsgId,
-		"to_suffix":   recipientSuffix(target),
+		"to":          target,
 		"text_len":    len(text),
+		"text":        text,
 	}
 	c.emit(EventMessageSendStart, startPayload, startPayload)
 
@@ -440,7 +441,7 @@ func (c *Client) sendOneText(adapter waAdapter, target string, text string, clie
 	defer cancel()
 	result, err := adapter.SendText(ctx, target, text, clientMsgId)
 	if err != nil {
-		message := sanitizeError(err.Error(), target, normalizePhone(target), text)
+		message := err.Error()
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			c.emitMessageFailed(clientMsgId, "send_timeout", message, sendRoutePayload(result))
 			return result, "send_timeout", err
@@ -667,8 +668,10 @@ func (c *Client) handleWAEvent(evt any) {
 			c.emitError("fresh_link_marker", err.Error())
 		}
 		c.emit(EventPaired, map[string]any{
+			"jid":        v.ID.String(),
 			"jid_suffix": jidSuffix(v.ID.String()),
 		}, map[string]any{
+			"jid":        v.ID.String(),
 			"jid_suffix": jidSuffix(v.ID.String()),
 		})
 	case *events.ManualLoginReconnect:
@@ -678,14 +681,18 @@ func (c *Client) handleWAEvent(evt any) {
 		c.setState(StateConnected)
 		if c.wasSessionRestore() {
 			c.emit(EventSessionRestored, map[string]any{
+				"jid":        c.userIDString(),
 				"jid_suffix": jidSuffix(c.userIDString()),
 			}, map[string]any{
+				"jid":        c.userIDString(),
 				"jid_suffix": jidSuffix(c.userIDString()),
 			})
 		}
 		c.emit(EventConnected, map[string]any{
+			"jid":        c.userIDString(),
 			"jid_suffix": jidSuffix(c.userIDString()),
 		}, map[string]any{
+			"jid":        c.userIDString(),
 			"jid_suffix": jidSuffix(c.userIDString()),
 		})
 	case *events.Disconnected:
@@ -786,7 +793,8 @@ func (c *Client) handleMessage(message *events.Message) {
 		"ts":            ts,
 	}
 	traceData := map[string]any{
-		"from_suffix":   jidSuffix(fromJID.String()),
+		"from_jid":      fromJID.String(),
+		"text":          text,
 		"text_len":      len(text),
 		"server_msg_id": string(message.Info.ID),
 		"ts":            ts,
@@ -910,20 +918,19 @@ func (c *Client) enterRiskStopIfNeeded(where string, err error) {
 
 func (c *Client) enterRiskStop(where string, reason string, duration time.Duration) {
 	until := time.Now().Add(duration)
-	safeReason := sanitizeTraceString(reason)
 
 	c.mu.Lock()
 	if !c.riskUntil.IsZero() && c.riskUntil.After(until) {
 		until = c.riskUntil
 	}
 	c.riskUntil = until
-	c.riskReason = safeReason
+	c.riskReason = reason
 	cancel := c.cancel
 	adapter := c.wa
 	c.state = StateDisconnected
 	c.mu.Unlock()
 
-	_ = c.writeRiskStop(until, safeReason)
+	_ = c.writeRiskStop(until, reason)
 	if cancel != nil {
 		cancel()
 	}
@@ -932,7 +939,7 @@ func (c *Client) enterRiskStop(where string, reason string, duration time.Durati
 	}
 	payload := map[string]any{
 		"where":               where,
-		"reason":              safeReason,
+		"reason":              reason,
 		"retry_after_seconds": int(time.Until(until).Seconds()),
 	}
 	c.emit(EventRiskStopped, payload, payload)
@@ -1154,7 +1161,7 @@ func recipientSuffix(recipient string) string {
 func sendRoutePayload(result sendTextResult) map[string]any {
 	payload := make(map[string]any)
 	if result.RecipientJID != "" {
-		payload["recipient_suffix"] = jidSuffix(result.RecipientJID)
+		payload["recipient_jid"] = result.RecipientJID
 	}
 	if result.RecipientServer != "" {
 		payload["recipient_server"] = result.RecipientServer
@@ -1163,17 +1170,6 @@ func sendRoutePayload(result sendTextResult) map[string]any {
 		payload["used_lid"] = result.UsedLID
 	}
 	return payload
-}
-
-func sanitizeError(message string, sensitive ...string) string {
-	out := message
-	for _, value := range sensitive {
-		if value == "" {
-			continue
-		}
-		out = strings.ReplaceAll(out, value, "[redacted]")
-	}
-	return out
 }
 
 func ackLevel(receiptType string) int {

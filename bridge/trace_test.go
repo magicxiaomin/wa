@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestExportTraceSanitizesSensitiveFields(t *testing.T) {
+func TestExportTraceIncludesRawResearchFields(t *testing.T) {
 	var trace traceRecorder
 	trace.add(EventQRGenerated, StateWaitingQR, map[string]any{
 		"qr":     "2@secret-qr-payload",
@@ -36,15 +36,15 @@ func TestExportTraceSanitizesSensitiveFields(t *testing.T) {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
 	out := string(raw)
-	for _, forbidden := range []string{
+	for _, required := range []string{
 		"2@secret-qr-payload",
 		"secret message body",
 		"15551234567",
 		"14155552671",
 		"auth token key session credential",
 	} {
-		if strings.Contains(out, forbidden) {
-			t.Fatalf("exported trace leaked %q: %s", forbidden, out)
+		if !strings.Contains(out, required) {
+			t.Fatalf("exported trace missing %q: %s", required, out)
 		}
 	}
 	if !strings.Contains(out, `"qr_len": 23`) {

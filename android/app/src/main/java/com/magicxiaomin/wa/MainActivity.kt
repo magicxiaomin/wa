@@ -298,16 +298,11 @@ class MainActivity : Activity() {
                 contacts.setOnItemClickListener { _, _, position, _ ->
                     val jid = contactItems[position].jid
                     if (contacts.isItemChecked(position)) {
-                        if (selectedContactJids.size >= MAX_MULTI_RECIPIENTS) {
-                            contacts.setItemChecked(position, false)
-                            status.text = "最多只能选择 $MAX_MULTI_RECIPIENTS 个联系人"
-                            return@setOnItemClickListener
-                        }
                         selectedContactJids.add(jid)
                     } else {
                         selectedContactJids.remove(jid)
                     }
-                    status.text = "Contacts selected: ${selectedContactJids.size}/${MAX_MULTI_RECIPIENTS}"
+                    status.text = "Contacts selected: ${selectedContactJids.size}"
                     updateSafetyControls()
                 }
                 status.text = "Contacts: ${items.size}"
@@ -378,11 +373,7 @@ class MainActivity : Activity() {
     private fun sendMultiContactMessage(text: String) {
         val targets = selectedContactJids.toList()
         if (targets.isEmpty()) {
-            status.text = "Select 1-$MAX_MULTI_RECIPIENTS contacts first"
-            return
-        }
-        if (targets.size > MAX_MULTI_RECIPIENTS) {
-            status.text = "最多只能选择 $MAX_MULTI_RECIPIENTS 个联系人"
+            status.text = "Select contacts first"
             return
         }
         val clientMsgId = "android-${UUID.randomUUID()}"
@@ -520,11 +511,11 @@ class MainActivity : Activity() {
         }
         for (i in 0 until array.length()) {
             val item = array.getJSONObject(i)
-            val suffix = item.optString("jid_suffix", "unknown")
+            val jid = item.optString("jid", "unknown")
             if (item.optBoolean("ok", false)) {
-                appendConversation("MULTI ok $suffix ${item.optString("server_msg_id")}")
+                appendConversation("MULTI ok $jid ${item.optString("server_msg_id")}")
             } else {
-                appendConversation("MULTI failed $suffix ${item.optString("error")}")
+                appendConversation("MULTI failed $jid ${item.optString("error")}")
             }
         }
     }
@@ -562,6 +553,5 @@ class MainActivity : Activity() {
 
     companion object {
         private const val UI_SEND_TIMEOUT_MS = 75_000L
-        private const val MAX_MULTI_RECIPIENTS = 3
     }
 }
