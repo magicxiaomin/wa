@@ -20,11 +20,6 @@
 - `message_failed`: `{ "clientMsgId": "uuid", "error_code": "...", "error": "短描述" }`
 - `disconnected`: `{ "reason": "...", "will_reconnect": true }`
 - `error`: `{ "where": "...", "message": "..." }`
-- `remote_relay_started`: `{ "url_host": "worker.example.com" }`（只记 host，不记 token）
-- `remote_relay_connected`: `{ "url_host": "worker.example.com" }`
-- `remote_relay_disconnected`: `{ "url_host": "worker.example.com" }`
-- `remote_relay_error`: `{ "where": "remoteRelay", "code": "timeout" }`
-- `remote_relay_stopped`: `{}`
 
 ## 脱敏要求（导出 trace.json 前必须执行）
 **绝对不能出现在 trace.json 里：**
@@ -32,7 +27,6 @@
 - ❌ 消息正文明文（连测试消息内容也不记，最多记长度或 hash）
 - ❌ 完整电话号码（只记后 4 位 + 国家码，如 `86...3000`）
 - ❌ 二维码 / pairing code 的完整内容
-- ❌ 远程 relay token / 带 token 的 URL
 
 **可以记录：**
 - 事件类型、时间戳、序号、连接状态

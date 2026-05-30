@@ -74,18 +74,6 @@ class BridgeForegroundService : Service() {
             }
         }
 
-        override fun startRemoteRelay(wsUrl: String, token: String) {
-            call("startRemoteRelay") { ensureClient("WA-Android").startRemoteRelay(wsUrl, token) }
-        }
-
-        override fun stopRemoteRelay() {
-            call("stopRemoteRelay") { client?.stopRemoteRelay() }
-        }
-
-        override fun getRemoteRelayStatus(): String {
-            return callWithResult("getRemoteRelayStatus", "{}") { client?.remoteRelayStatus() ?: "{}" }
-        }
-
         override fun exportTrace(path: String) {
             call("exportTrace") { ensureClient("WA-Android").exportTrace(path) }
         }

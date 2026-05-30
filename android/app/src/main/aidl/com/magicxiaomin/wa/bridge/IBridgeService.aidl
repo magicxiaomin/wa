@@ -15,9 +15,6 @@ interface IBridgeService {
     String resolveJID(String phoneOrJid);
     void sendText(String to, String text, String clientMsgId);
     String sendTextMulti(String toJidsJson, String text, String clientMsgId);
-    void startRemoteRelay(String wsUrl, String token);
-    void stopRemoteRelay();
-    String getRemoteRelayStatus();
     void exportTrace(String path);
     void clearSession();
 }

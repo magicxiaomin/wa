@@ -95,7 +95,6 @@ type Client struct {
 	nextActiveAt  time.Time
 	riskUntil     time.Time
 	riskReason    string
-	remoteRelay   *remoteRelayClient
 
 	trace traceRecorder
 	newWA func(context.Context, string, string) (waAdapter, bool, error)
@@ -211,8 +210,6 @@ func (c *Client) Start() (err error) {
 
 func (c *Client) Stop() (err error) {
 	defer c.recoverAsError("Stop", &err)
-
-	_ = c.StopRemoteRelay()
 
 	c.mu.Lock()
 	cancel := c.cancel
