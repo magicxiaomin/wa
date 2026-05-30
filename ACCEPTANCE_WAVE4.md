@@ -16,7 +16,7 @@
 - [ ] `GetContacts` 本地入口保留。
 - [ ] `GetGroups` 本地入口保留。
 - [ ] `SendText` 本地 1:1 文本发送入口保留。
-- [ ] `SendTextMulti` 本地 1-3 联系人发送入口保留。
+- [ ] `SendTextMulti` 本地接口研究入口保留，wrapper 不再强制 3 人上限。
 - [ ] 本地发到 1 个群入口保留。
 - [ ] `ExportTrace` / `SafetyStatus` 保留。
 - [ ] UI 联系人多选最多 3 个，选满后拒绝继续选择。
@@ -34,7 +34,7 @@
 - [ ] 项目不包含任何云端 relay / 远程触发发送能力。
 - [ ] Android 本地 whatsmeow 接口研究能力保留。
 - [ ] 范围守住：无云端、无队列、无调度、无远程群发、无多账号。
-- [ ] 安全限制仍存在：UI 最多 3 人，wrapper 仍有 3 人硬上限、节流、risk-stop。
+- [ ] 安全限制转到交互层：UI 最多 3 人，wrapper 保留节流、risk-stop、trace 脱敏。
 
 ## 不阻塞通过的已知项
 

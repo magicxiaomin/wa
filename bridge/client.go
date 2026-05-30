@@ -45,11 +45,6 @@ const (
 )
 
 const (
-	maxSendsPerRun         = 5
-	maxMultiSendRecipients = 3
-)
-
-const (
 	freshLinkContactDelay = 2 * time.Minute
 	freshLinkSendDelay    = 10 * time.Minute
 	freshLinkMarkerFile   = "fresh-linked-at"
@@ -333,7 +328,7 @@ func (c *Client) sendTextChecked(to string, text string, clientMsgId string) err
 		return err
 	}
 
-	adapter, code, err := c.checkSendGate(1)
+	adapter, code, err := c.checkSendGate()
 	if err != nil {
 		c.emitMessageFailed(clientMsgId, code, err.Error())
 		return err
@@ -374,20 +369,7 @@ func (c *Client) SendTextMulti(toJidsJson string, text string, clientMsgId strin
 		c.emitMessageFailed(clientMsgId, "invalid_request", err.Error())
 		return "", err
 	}
-	if len(trimmed) > maxMultiSendRecipients {
-		err := fmt.Errorf("exceeds max %d recipients", maxMultiSendRecipients)
-		c.emitMessageFailed(clientMsgId, "too_many_recipients", err.Error())
-		return "", err
-	}
-	for _, target := range trimmed {
-		if !isPersonalRecipientJID(target) {
-			err := errors.New("recipient must be a 1:1 WhatsApp user JID")
-			c.emitMessageFailed(clientMsgId, "invalid_request", err.Error())
-			return "", err
-		}
-	}
-
-	adapter, code, err := c.checkSendGate(len(trimmed))
+	adapter, code, err := c.checkSendGate()
 	if err != nil {
 		c.emitMessageFailed(clientMsgId, code, err.Error())
 		return "", err
@@ -419,14 +401,11 @@ func (c *Client) SendTextMulti(toJidsJson string, text string, clientMsgId strin
 	return string(b), nil
 }
 
-func (c *Client) checkSendGate(recipientCount int) (waAdapter, string, error) {
+func (c *Client) checkSendGate() (waAdapter, string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if remaining := c.riskRemainingLocked(); remaining > 0 {
 		return nil, "risk_stopped", riskStoppedError(c.riskReason, remaining)
-	}
-	if c.sendCount+recipientCount > maxSendsPerRun {
-		return nil, "send_limit_exceeded", fmt.Errorf("send limit exceeded: max %d messages per run", maxSendsPerRun)
 	}
 	if remaining := c.freshLinkRemainingLocked(freshLinkSendDelay); remaining > 0 {
 		return nil, "fresh_link_cooldown", freshLinkCooldownError("sending", remaining)
@@ -1170,15 +1149,6 @@ func recipientSuffix(recipient string) string {
 		return jidSuffix(recipient)
 	}
 	return maskedPhone(normalizePhone(recipient))
-}
-
-func isPersonalRecipientJID(recipient string) bool {
-	at := strings.LastIndexByte(recipient, '@')
-	if at <= 0 {
-		return false
-	}
-	server := recipient[at+1:]
-	return server == "s.whatsapp.net" || server == "lid"
 }
 
 func sendRoutePayload(result sendTextResult) map[string]any {

@@ -87,17 +87,17 @@ WhatsApp
 - 群发送只能选 1 个群。
 - 不提供远程发送入口。
 
-同时保留 Go wrapper 的硬限制作为最后防线：
+Go wrapper 改为更接近接口研究语义：
 
-- `SendTextMulti` 目标数必须为 1-3。
-- `SendTextMulti` 不允许 `@g.us`。
-- 保留发送节流。
+- `SendTextMulti` 不再强制 1-3 目标上限。
+- `SendTextMulti` 不再强制拒绝 `@g.us`。
+- 不再使用 wrapper 进程内发送计数上限。
+- 保留发送节流，便于观察连续调用行为且避免瞬时请求。
 - 保留 risk-stop。
-- 保留发送计数限制。
 - trace 不记录 session key、完整号码、完整 JID、消息正文。
 
-原因：即使当前项目只面向 UI 研究，AIDL、测试入口或后续代码仍可能直接调用 wrapper。
-wrapper 防线保留可以避免 UI bug 直接扩大行为边界。
+原因：本波定位为 whatsmeow Android 接口研究，wrapper 尽量少改变底层能力；用户交互限制放在 UI。
+账号状态保护和隐私保护仍保留在 wrapper。
 
 ---
 

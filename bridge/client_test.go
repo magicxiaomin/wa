@@ -367,7 +367,7 @@ func TestSendTextForTestRejectsNonWhitelistedRecipient(t *testing.T) {
 	}
 }
 
-func TestSendTextForTestRejectsAfterSendLimit(t *testing.T) {
+func TestSendTextForTestDoesNotApplyProcessSendLimit(t *testing.T) {
 	oldInterval := activeOperationMinInterval
 	activeOperationMinInterval = 0
 	defer func() { activeOperationMinInterval = oldInterval }()
@@ -388,16 +388,13 @@ func TestSendTextForTestRejectsAfterSendLimit(t *testing.T) {
 	}
 	c.setState(StateConnected)
 
-	for i := 0; i < maxSendsPerRun; i++ {
+	for i := 0; i < 6; i++ {
 		if err := c.SendTextForTest("15551234567", "hello", "client-ok"); err != nil {
 			t.Fatalf("SendTextForTest() #%d error = %v", i+1, err)
 		}
 	}
-	if err := c.SendTextForTest("15551234567", "hello", "client-limit"); err == nil {
-		t.Fatal("SendTextForTest() after limit error = nil")
-	}
-	if fake.sendCalls != maxSendsPerRun {
-		t.Fatalf("adapter send calls = %d, want %d", fake.sendCalls, maxSendsPerRun)
+	if fake.sendCalls != 6 {
+		t.Fatalf("adapter send calls = %d, want 6", fake.sendCalls)
 	}
 }
 
@@ -462,36 +459,62 @@ func TestSendTextMultiSendsTwoAndThreeRecipients(t *testing.T) {
 	}
 }
 
-func TestSendTextMultiRejectsFourRecipientsWithoutSending(t *testing.T) {
+func TestSendTextMultiAllowsFourRecipientsWhenCalledDirectly(t *testing.T) {
+	restore := overrideMultiSendTestTiming()
+	defer restore()
+
 	events := newEventRecorder()
 	fake := newFakeWAAdapter()
+	fake.sendResultsByTarget = map[string]sendTextResult{
+		"15550000001@s.whatsapp.net": {ServerMessageID: "server-1", RecipientJID: "15550000001@s.whatsapp.net"},
+		"15550000002@s.whatsapp.net": {ServerMessageID: "server-2", RecipientJID: "15550000002@s.whatsapp.net"},
+		"15550000003@s.whatsapp.net": {ServerMessageID: "server-3", RecipientJID: "15550000003@s.whatsapp.net"},
+		"15550000004@s.whatsapp.net": {ServerMessageID: "server-4", RecipientJID: "15550000004@s.whatsapp.net"},
+	}
 	c := newStartedConnectedTestClient(t, events, fake)
 
-	_, err := c.SendTextMulti(`[
+	got, err := c.SendTextMulti(`[
 		"15550000001@s.whatsapp.net",
 		"15550000002@s.whatsapp.net",
 		"15550000003@s.whatsapp.net",
 		"15550000004@s.whatsapp.net"
 	]`, "hello", "multi-limit")
-	if err == nil || !strings.Contains(err.Error(), "exceeds max 3 recipients") {
-		t.Fatalf("SendTextMulti() error = %v, want max recipients error", err)
+	if err != nil {
+		t.Fatalf("SendTextMulti() error = %v", err)
 	}
-	if fake.sendCalls != 0 {
-		t.Fatalf("over-limit SendTextMulti reached adapter %d times", fake.sendCalls)
+	if fake.sendCalls != 4 {
+		t.Fatalf("SendTextMulti() calls = %d, want 4", fake.sendCalls)
+	}
+	var results []multiSendResult
+	if err := json.Unmarshal([]byte(got), &results); err != nil {
+		t.Fatalf("results JSON invalid: %v; %s", err, got)
+	}
+	if len(results) != 4 {
+		t.Fatalf("results len = %d, want 4: %s", len(results), got)
 	}
 }
 
-func TestSendTextMultiRejectsGroupRecipientWithoutSending(t *testing.T) {
+func TestSendTextMultiAllowsGroupRecipientWhenCalledDirectly(t *testing.T) {
+	restore := overrideMultiSendTestTiming()
+	defer restore()
+
 	events := newEventRecorder()
 	fake := newFakeWAAdapter()
+	fake.sendResultsByTarget = map[string]sendTextResult{
+		"15550000001@s.whatsapp.net": {ServerMessageID: "server-1", RecipientJID: "15550000001@s.whatsapp.net"},
+		"120363000000000000@g.us":    {ServerMessageID: "server-group", RecipientJID: "120363000000000000@g.us", RecipientServer: "g.us"},
+	}
 	c := newStartedConnectedTestClient(t, events, fake)
 
-	_, err := c.SendTextMulti(`["15550000001@s.whatsapp.net","120363000000000000@g.us"]`, "hello", "multi-group")
-	if err == nil || !strings.Contains(err.Error(), "1:1 WhatsApp user JID") {
-		t.Fatalf("SendTextMulti() error = %v, want group recipient rejection", err)
+	got, err := c.SendTextMulti(`["15550000001@s.whatsapp.net","120363000000000000@g.us"]`, "hello", "multi-group")
+	if err != nil {
+		t.Fatalf("SendTextMulti() error = %v", err)
 	}
-	if fake.sendCalls != 0 {
-		t.Fatalf("group recipient SendTextMulti reached adapter %d times", fake.sendCalls)
+	if fake.sendCalls != 2 {
+		t.Fatalf("SendTextMulti() calls = %d, want 2", fake.sendCalls)
+	}
+	if strings.Contains(got, "15550000001@s.whatsapp.net") || strings.Contains(got, "120363000000000000@g.us") {
+		t.Fatalf("SendTextMulti result leaked full JID: %s", got)
 	}
 }
 
