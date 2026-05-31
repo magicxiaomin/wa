@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# This script rebuilds wamobile.aar and then extracts generated packaging
+# fragments used by :wa-sdk:
+#   - android/wa-sdk/libs/wamobile-classes.jar
+#   - android/wa-sdk/src/main/jniLibs/arm64-v8a/libgojni.so
+# Rerun this script after any Go bridge change so those fragments stay in sync
+# with the source wamobile.aar.
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TOOLS_DIR="$HOME/.local/share/codex-wa-tools"
 
@@ -23,10 +30,19 @@ case "$GO_VERSION" in
     ;;
 esac
 
-"$TOOLS_DIR/go-tools/gomobile" bind -target=android/arm64 -androidapi 24 -o "$ROOT_DIR/android/app/libs/wamobile.aar" "$ROOT_DIR/bridge"
-cp "$ROOT_DIR/android/app/libs/wamobile.aar" "$ROOT_DIR/android/libs/wamobile.aar"
+"$TOOLS_DIR/go-tools/gomobile" bind -target=android/arm64 -androidapi 24 -o "$ROOT_DIR/android/wa-sdk/libs/wamobile.aar" "$ROOT_DIR/bridge"
+cp "$ROOT_DIR/android/wa-sdk/libs/wamobile.aar" "$ROOT_DIR/android/libs/wamobile.aar"
+
+TMP_AAR_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_AAR_DIR"' EXIT
+unzip -q "$ROOT_DIR/android/wa-sdk/libs/wamobile.aar" classes.jar jni/arm64-v8a/libgojni.so -d "$TMP_AAR_DIR"
+cp "$TMP_AAR_DIR/classes.jar" "$ROOT_DIR/android/wa-sdk/libs/wamobile-classes.jar"
+mkdir -p "$ROOT_DIR/android/wa-sdk/src/main/jniLibs/arm64-v8a"
+cp "$TMP_AAR_DIR/jni/arm64-v8a/libgojni.so" "$ROOT_DIR/android/wa-sdk/src/main/jniLibs/arm64-v8a/libgojni.so"
 
 (
   cd "$ROOT_DIR/android"
-  "$TOOLS_DIR/gradle-8.10.2/bin/gradle" --no-daemon :app:assembleDebug
+  "$TOOLS_DIR/gradle-8.10.2/bin/gradle" --no-daemon :wa-sdk:assembleRelease :sample-app:assembleDebug
 )
+
+cp "$ROOT_DIR/android/wa-sdk/build/outputs/aar/wa-sdk-release.aar" "$ROOT_DIR/android/libs/wa-sdk-release.aar"

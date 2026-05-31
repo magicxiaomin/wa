@@ -656,6 +656,188 @@ func TestGetGroupsReturnsJSON(t *testing.T) {
 	}
 }
 
+func TestGetSelfIdentityReturnsJSON(t *testing.T) {
+	events := newEventRecorder()
+	fake := newFakeWAAdapter()
+	fake.userID = "15551234567@s.whatsapp.net"
+	fake.loggedIn = true
+	fake.connected = true
+	c := newStartedConnectedTestClient(t, events, fake)
+	dbPath := filepath.Join(c.dataDir, "whatsmeow.db")
+	if err := os.WriteFile(dbPath, []byte("debug-db"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	got, err := c.GetSelfIdentity()
+	if err != nil {
+		t.Fatalf("GetSelfIdentity() error = %v", err)
+	}
+	for _, required := range []string{
+		`"self_jid":"15551234567@s.whatsapp.net"`,
+		`"jid_server":"s.whatsapp.net"`,
+		`"state":"connected"`,
+		`"is_logged_in":true`,
+		`"is_connected":true`,
+		`"has_session_db":true`,
+		`"device_name":"wa-test-device"`,
+	} {
+		if !strings.Contains(got, required) {
+			t.Fatalf("GetSelfIdentity() missing %s: %s", required, got)
+		}
+	}
+}
+
+func TestGetUserInfoReturnsJSON(t *testing.T) {
+	events := newEventRecorder()
+	fake := newFakeWAAdapter()
+	fake.userInfoResults = []userInfoResult{{
+		JID:       "15551234567@s.whatsapp.net",
+		Found:     true,
+		Status:    "available",
+		PictureID: "pic-1",
+		LID:       "abc@lid",
+		Devices:   []string{"15551234567:1@s.whatsapp.net"},
+	}}
+	c := newStartedConnectedTestClient(t, events, fake)
+
+	got, err := c.GetUserInfo(`["15551234567@s.whatsapp.net"]`)
+	if err != nil {
+		t.Fatalf("GetUserInfo() error = %v", err)
+	}
+	for _, required := range []string{`"found":true`, `"status":"available"`, `"picture_id":"pic-1"`, `"lid":"abc@lid"`} {
+		if !strings.Contains(got, required) {
+			t.Fatalf("GetUserInfo() missing %s: %s", required, got)
+		}
+	}
+}
+
+func TestGetUserInfoRejectsBadJSON(t *testing.T) {
+	c := newStartedConnectedTestClient(t, newEventRecorder(), newFakeWAAdapter())
+	if _, err := c.GetUserInfo(`not-json`); err == nil || !strings.Contains(err.Error(), "JSON array") {
+		t.Fatalf("GetUserInfo() error = %v, want JSON array error", err)
+	}
+}
+
+func TestGetProfilePictureInfoReturnsJSON(t *testing.T) {
+	events := newEventRecorder()
+	fake := newFakeWAAdapter()
+	fake.profileResult = profilePictureResult{
+		JID:   "15551234567@s.whatsapp.net",
+		Found: true,
+		URL:   "https://example.invalid/pic.jpg",
+		ID:    "pic-1",
+		Type:  "image",
+	}
+	c := newStartedConnectedTestClient(t, events, fake)
+
+	got, err := c.GetProfilePictureInfo("15551234567@s.whatsapp.net")
+	if err != nil {
+		t.Fatalf("GetProfilePictureInfo() error = %v", err)
+	}
+	if !strings.Contains(got, `"found":true`) || !strings.Contains(got, `"url":"https://example.invalid/pic.jpg"`) {
+		t.Fatalf("GetProfilePictureInfo() unexpected JSON: %s", got)
+	}
+}
+
+func TestWave5APIValidationErrors(t *testing.T) {
+	c := newStartedConnectedTestClient(t, newEventRecorder(), newFakeWAAdapter())
+
+	if _, err := c.GetUserInfo(`[]`); err == nil || !strings.Contains(err.Error(), "at least one jid") {
+		t.Fatalf("GetUserInfo() error = %v, want empty jid list error", err)
+	}
+	if _, err := c.GetProfilePictureInfo(""); err == nil || !strings.Contains(err.Error(), "jid is required") {
+		t.Fatalf("GetProfilePictureInfo() error = %v, want jid required error", err)
+	}
+	if err := c.MarkRead("", `["msg-1"]`, ""); err == nil || !strings.Contains(err.Error(), "chatJid is required") {
+		t.Fatalf("MarkRead() error = %v, want chatJid required error", err)
+	}
+	if err := c.SubscribePresence(""); err == nil || !strings.Contains(err.Error(), "jid is required") {
+		t.Fatalf("SubscribePresence() error = %v, want jid required error", err)
+	}
+	if err := c.ExportSessionDebug(""); err == nil || !strings.Contains(err.Error(), "path is required") {
+		t.Fatalf("ExportSessionDebug() error = %v, want path required error", err)
+	}
+}
+
+func TestMarkReadEmitsSuccessAndRejectsBadJSON(t *testing.T) {
+	events := newEventRecorder()
+	fake := newFakeWAAdapter()
+	c := newStartedConnectedTestClient(t, events, fake)
+
+	if err := c.MarkRead("15551234567@s.whatsapp.net", `["msg-1","msg-2"]`, "15551234567@s.whatsapp.net"); err != nil {
+		t.Fatalf("MarkRead() error = %v", err)
+	}
+	if fake.markReadCalls != 1 {
+		t.Fatalf("markReadCalls = %d, want 1", fake.markReadCalls)
+	}
+	got := events.waitFor(t, "mark_read_success")
+	if !strings.Contains(got.payload, `"message_count":2`) {
+		t.Fatalf("mark_read_success missing count: %s", got.payload)
+	}
+
+	if err := c.MarkRead("15551234567@s.whatsapp.net", `not-json`, ""); err == nil || !strings.Contains(err.Error(), "JSON array") {
+		t.Fatalf("MarkRead() error = %v, want JSON array error", err)
+	}
+}
+
+func TestSendPresenceAndSubscribePresence(t *testing.T) {
+	events := newEventRecorder()
+	fake := newFakeWAAdapter()
+	c := newStartedConnectedTestClient(t, events, fake)
+
+	if err := c.SendPresence("available"); err != nil {
+		t.Fatalf("SendPresence() error = %v", err)
+	}
+	if fake.presenceState != "available" {
+		t.Fatalf("presenceState = %q, want available", fake.presenceState)
+	}
+	if got := events.waitFor(t, "presence_sent"); !strings.Contains(got.payload, `"state":"available"`) {
+		t.Fatalf("presence_sent payload = %s", got.payload)
+	}
+	if err := c.SendPresence("busy"); err == nil || !strings.Contains(err.Error(), "presence state") {
+		t.Fatalf("SendPresence() error = %v, want validation error", err)
+	}
+
+	c.setState(StateConnected)
+	c.nextActiveAt = time.Time{}
+	if err := c.SubscribePresence("15551234567@s.whatsapp.net"); err != nil {
+		t.Fatalf("SubscribePresence() error = %v", err)
+	}
+	if fake.subscribeJID != "15551234567@s.whatsapp.net" {
+		t.Fatalf("subscribeJID = %q", fake.subscribeJID)
+	}
+}
+
+func TestExportSessionDebugWritesLocalFiles(t *testing.T) {
+	events := newEventRecorder()
+	fake := newFakeWAAdapter()
+	fake.userID = "15551234567@s.whatsapp.net"
+	fake.loggedIn = true
+	fake.connected = true
+	c := newStartedConnectedTestClient(t, events, fake)
+	dbPath := filepath.Join(c.dataDir, "whatsmeow.db")
+	if err := os.WriteFile(dbPath, []byte("debug-db"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	outDir := filepath.Join(t.TempDir(), "session-debug")
+	if err := c.ExportSessionDebug(outDir); err != nil {
+		t.Fatalf("ExportSessionDebug() error = %v", err)
+	}
+	for _, name := range []string{"trace.json", "session-debug.json"} {
+		if _, err := os.Stat(filepath.Join(outDir, name)); err != nil {
+			t.Fatalf("%s not written: %v", name, err)
+		}
+	}
+	raw, err := os.ReadFile(filepath.Join(outDir, "session-debug.json"))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !strings.Contains(string(raw), `"self_jid": "15551234567@s.whatsapp.net"`) ||
+		!strings.Contains(string(raw), `"exists": true`) {
+		t.Fatalf("session-debug.json missing expected fields: %s", raw)
+	}
+}
+
 func TestFreshLinkedDeviceCooldownBlocksContactsAndSend(t *testing.T) {
 	events := newEventRecorder()
 	fake := newFakeWAAdapter()
@@ -985,6 +1167,19 @@ type fakeWAAdapter struct {
 	reconnectCalls      int
 	disconnected        bool
 	closed              bool
+	userInfoResults     []userInfoResult
+	userInfoErr         error
+	profileResult       profilePictureResult
+	profileErr          error
+	markReadCalls       int
+	markReadErr         error
+	presenceState       string
+	presenceErr         error
+	subscribeJID        string
+	subscribeErr        error
+	userID              string
+	loggedIn            bool
+	connected           bool
 }
 
 func newFakeWAAdapter() *fakeWAAdapter {
@@ -1023,7 +1218,7 @@ func (f *fakeWAAdapter) Close() error {
 	return nil
 }
 
-func (f *fakeWAAdapter) UserIDString() string { return "" }
+func (f *fakeWAAdapter) UserIDString() string { return f.userID }
 
 func (f *fakeWAAdapter) SendText(ctx context.Context, phone string, text string, clientMsgId string) (sendTextResult, error) {
 	f.sendCalls++
@@ -1052,3 +1247,33 @@ func (f *fakeWAAdapter) GetGroups(context.Context) ([]groupInfo, error) {
 func (f *fakeWAAdapter) ResolveJID(context.Context, string) (string, error) {
 	return "15551234567@s.whatsapp.net", nil
 }
+
+func (f *fakeWAAdapter) GetUserInfo(context.Context, []string) ([]userInfoResult, error) {
+	if f.userInfoErr != nil {
+		return nil, f.userInfoErr
+	}
+	return f.userInfoResults, nil
+}
+
+func (f *fakeWAAdapter) GetProfilePictureInfo(context.Context, string) (profilePictureResult, error) {
+	return f.profileResult, f.profileErr
+}
+
+func (f *fakeWAAdapter) MarkRead(_ context.Context, _ string, _ []string, _ string) error {
+	f.markReadCalls++
+	return f.markReadErr
+}
+
+func (f *fakeWAAdapter) SendPresence(_ context.Context, state string) error {
+	f.presenceState = state
+	return f.presenceErr
+}
+
+func (f *fakeWAAdapter) SubscribePresence(_ context.Context, jid string) error {
+	f.subscribeJID = jid
+	return f.subscribeErr
+}
+
+func (f *fakeWAAdapter) IsLoggedIn() bool { return f.loggedIn }
+
+func (f *fakeWAAdapter) IsConnected() bool { return f.connected }
