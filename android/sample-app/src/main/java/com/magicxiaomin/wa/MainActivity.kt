@@ -9,6 +9,8 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.WindowInsets
+import android.view.View
+import android.view.ViewGroup
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
@@ -32,11 +34,13 @@ class MainActivity : Activity() {
         }
     }
     private enum class TargetMode { CONTACTS, GROUPS }
+    private enum class Page { LOGIN, CONTACTS, GROUPS, DEBUG }
     private data class TargetItem(val jid: String, val label: String)
     private data class PendingSend(val target: String, val text: String, val startedAtMs: Long)
 
     private lateinit var bridgeClient: WaBridgeClient
     private var targetMode = TargetMode.CONTACTS
+    private var currentPage = Page.LOGIN
     private val contactItems = mutableListOf<TargetItem>()
     private val groupItems = mutableListOf<TargetItem>()
     private val selectedContactJids = linkedSetOf<String>()
@@ -49,7 +53,15 @@ class MainActivity : Activity() {
     private lateinit var qrPayload: TextView
     private lateinit var contacts: ListView
     private lateinit var conversation: TextView
+    private lateinit var logScroll: ScrollView
     private lateinit var messageInput: EditText
+    private lateinit var resolveInput: EditText
+    private lateinit var selectedSummary: TextView
+    private lateinit var contentContainer: LinearLayout
+    private lateinit var loginTabButton: Button
+    private lateinit var contactsTabButton: Button
+    private lateinit var groupsTabButton: Button
+    private lateinit var debugTabButton: Button
     private lateinit var connectButton: Button
     private lateinit var stateButton: Button
     private lateinit var safetyButton: Button
@@ -66,6 +78,7 @@ class MainActivity : Activity() {
     private lateinit var disconnectButton: Button
     private lateinit var exportTraceButton: Button
     private lateinit var exportSessionDebugButton: Button
+    private lateinit var clearSessionButton: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -82,20 +95,22 @@ class MainActivity : Activity() {
     private fun buildUi() {
         status = TextView(this).apply {
             textSize = 15f
-            text = "Starting bridge service..."
+            text = getString(R.string.status_starting)
+            maxLines = 4
         }
         qrImage = ImageView(this).apply {
             adjustViewBounds = true
-            maxHeight = 720
+            maxHeight = dp(360)
         }
         qrPayload = TextView(this).apply {
             textSize = 10f
             setTextIsSelectable(true)
+            maxLines = 4
         }
         contacts = ListView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                (64 * resources.displayMetrics.density * 5).toInt()
+                dp(320)
             )
             choiceMode = ListView.CHOICE_MODE_MULTIPLE
             isVerticalScrollBarEnabled = true
@@ -106,59 +121,70 @@ class MainActivity : Activity() {
             setTextIsSelectable(true)
         }
         messageInput = EditText(this).apply {
-            hint = "Text message"
+            hint = getString(R.string.hint_text_message)
             setSingleLine(false)
             minLines = 2
         }
+        resolveInput = EditText(this).apply {
+            hint = getString(R.string.hint_resolve)
+            setSingleLine(true)
+        }
+        selectedSummary = TextView(this).apply {
+            textSize = 14f
+            text = getString(R.string.no_target_selected)
+        }
+        contentContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
 
         connectButton = Button(this).apply {
-            text = "Connect / QR"
+            text = getString(R.string.connect_qr)
             setOnClickListener {
-                status.text = "Connecting..."
+                status.text = getString(R.string.connecting)
                 runBridgeCall { bridgeClient.connectBridge() }
             }
         }
         stateButton = Button(this).apply {
-            text = "Get State"
+            text = getString(R.string.get_state)
             setOnClickListener { runJsonCall("STATE") { bridgeClient.getState() } }
         }
         safetyButton = Button(this).apply {
-            text = "Get Safety"
+            text = getString(R.string.get_safety)
             setOnClickListener { runJsonCall("SAFETY") { bridgeClient.getSafetyStatus() } }
         }
         identityButton = Button(this).apply {
-            text = "Get Self Identity"
+            text = getString(R.string.get_self_identity)
             setOnClickListener { runJsonCall("SELF") { bridgeClient.getSelfIdentity() } }
         }
         contactsButton = Button(this).apply {
-            text = "Get Contacts"
+            text = getString(R.string.get_contacts)
             setOnClickListener { loadContacts() }
         }
         groupsButton = Button(this).apply {
-            text = "Get Groups"
+            text = getString(R.string.get_groups)
             setOnClickListener { loadGroups() }
         }
         resolveButton = Button(this).apply {
-            text = "Resolve Input/JID"
+            text = getString(R.string.resolve_input_jid)
             setOnClickListener {
-                val value = messageInput.text.toString().trim()
+                val value = resolveInput.text.toString().trim()
                 if (value.isBlank()) {
-                    status.text = "Enter phone or JID in text box first"
+                    status.text = getString(R.string.enter_resolve_first)
                 } else {
                     runJsonCall("RESOLVE") { bridgeClient.resolveJID(value) }
                 }
             }
         }
         userInfoButton = Button(this).apply {
-            text = "Get User Info"
+            text = getString(R.string.get_user_info)
             setOnClickListener { runSelectedJidsJsonCall("USER_INFO") { bridgeClient.getUserInfo(it) } }
         }
         profileButton = Button(this).apply {
-            text = "Get Profile Picture"
+            text = getString(R.string.get_profile_picture)
             setOnClickListener { runSelectedJidCall("PROFILE") { bridgeClient.getProfilePictureInfo(it) } }
         }
         markReadButton = Button(this).apply {
-            text = "Mark Read (selected)"
+            text = getString(R.string.mark_read_selected)
             setOnClickListener {
                 runSelectedJidCall("MARK_READ") { jid ->
                     bridgeClient.markRead(jid, JSONArray(listOf("manual-message-id")).toString(), jid)
@@ -167,15 +193,15 @@ class MainActivity : Activity() {
             }
         }
         presenceButton = Button(this).apply {
-            text = "Send Presence"
+            text = getString(R.string.send_presence)
             setOnClickListener {
-                runBridgeCall(onSuccess = { appendConversation("PRESENCE requested available") }) {
+                runBridgeCall(onSuccess = { appendConversation(getString(R.string.presence_requested_available)) }) {
                     bridgeClient.sendPresence("available")
                 }
             }
         }
         subscribePresenceButton = Button(this).apply {
-            text = "Subscribe Presence"
+            text = getString(R.string.subscribe_presence)
             setOnClickListener {
                 runSelectedJidCall("SUBSCRIBE_PRESENCE") { jid ->
                     bridgeClient.subscribePresence(jid)
@@ -184,28 +210,28 @@ class MainActivity : Activity() {
             }
         }
         sendButton = Button(this).apply {
-            text = "Send"
+            text = getString(R.string.send)
             setOnClickListener { sendMessage() }
         }
         disconnectButton = Button(this).apply {
-            text = "Disconnect"
+            text = getString(R.string.disconnect)
             setOnClickListener {
-                status.text = "Disconnecting..."
+                status.text = getString(R.string.disconnecting)
                 runBridgeCall { bridgeClient.disconnectBridge() }
             }
         }
         exportTraceButton = Button(this).apply {
-            text = "Export Trace"
+            text = getString(R.string.export_trace)
             setOnClickListener { exportTrace() }
         }
         exportSessionDebugButton = Button(this).apply {
-            text = "Export Session Debug"
+            text = getString(R.string.export_session_debug)
             setOnClickListener { exportSessionDebug() }
         }
-        val clear = Button(this).apply {
-            text = "Clear Session (long press)"
+        clearSessionButton = Button(this).apply {
+            text = getString(R.string.clear_session_long_press)
             setOnClickListener {
-                status.text = "Long press Clear Session to erase login"
+                status.text = getString(R.string.clear_session_hint)
             }
             setOnLongClickListener {
                 resetUiAfterSessionClear()
@@ -214,7 +240,20 @@ class MainActivity : Activity() {
             }
         }
 
-        val content = LinearLayout(this@MainActivity).apply {
+        loginTabButton = navButton(getString(R.string.tab_login), Page.LOGIN)
+        contactsTabButton = navButton(getString(R.string.tab_contacts), Page.CONTACTS)
+        groupsTabButton = navButton(getString(R.string.tab_groups), Page.GROUPS)
+        debugTabButton = navButton(getString(R.string.tab_debug), Page.DEBUG)
+
+        logScroll = ScrollView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(170)
+            )
+            addView(conversation)
+        }
+
+        val root = LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(32, 32, 32, 32)
             setOnApplyWindowInsetsListener { view, insets ->
@@ -243,35 +282,178 @@ class MainActivity : Activity() {
             insets
             }
             addView(status)
-            addView(connectButton)
-            addView(stateButton)
-            addView(safetyButton)
-            addView(qrImage)
-            addView(qrPayload)
-            addView(identityButton)
-            addView(contactsButton)
-            addView(groupsButton)
-            addView(contacts)
-            addView(resolveButton)
-            addView(userInfoButton)
-            addView(profileButton)
-            addView(markReadButton)
-            addView(presenceButton)
-            addView(subscribePresenceButton)
-            addView(messageInput)
-            addView(sendButton)
-            addView(disconnectButton)
-            addView(exportTraceButton)
-            addView(exportSessionDebugButton)
-            addView(clear)
-            addView(conversation)
+            addView(row(loginTabButton, contactsTabButton, groupsTabButton, debugTabButton))
+            addView(
+                ScrollView(this@MainActivity).apply {
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        0,
+                        1f
+                    )
+                    addView(contentContainer)
+                }
+            )
+            addView(TextView(this@MainActivity).apply {
+                text = getString(R.string.event_log_title)
+                textSize = 13f
+            })
+            addView(logScroll)
         }
 
-        setContentView(
-            ScrollView(this).apply {
-                addView(content)
+        setContentView(root)
+        switchPage(Page.LOGIN)
+    }
+
+    private fun navButton(label: String, page: Page): Button {
+        return Button(this).apply {
+            text = label
+            setOnClickListener { switchPage(page) }
+        }
+    }
+
+    private fun switchPage(page: Page) {
+        currentPage = page
+        contentContainer.removeAllViews()
+        loginTabButton.isEnabled = page != Page.LOGIN
+        contactsTabButton.isEnabled = page != Page.CONTACTS
+        groupsTabButton.isEnabled = page != Page.GROUPS
+        debugTabButton.isEnabled = page != Page.DEBUG
+        when (page) {
+            Page.LOGIN -> showLoginPage()
+            Page.CONTACTS -> showContactsPage()
+            Page.GROUPS -> showGroupsPage()
+            Page.DEBUG -> showDebugPage()
+        }
+        refreshSelectedSummary()
+        updateSafetyControls()
+    }
+
+    private fun showLoginPage() {
+        contentContainer.addView(section(getString(R.string.section_login)))
+        contentContainer.addView(row(connectButton, stateButton))
+        contentContainer.addView(row(safetyButton, identityButton))
+        contentContainer.addView(qrImage)
+        contentContainer.addView(qrPayload)
+    }
+
+    private fun showContactsPage() {
+        targetMode = TargetMode.CONTACTS
+        sendButton.text = getString(R.string.send_to_selected_contacts)
+        renderContactList()
+        contentContainer.addView(section(getString(R.string.section_contacts)))
+        contentContainer.addView(row(contactsButton))
+        contentContainer.addView(selectedSummary)
+        contentContainer.addView(contacts)
+        contentContainer.addView(section(getString(R.string.section_inspect_presence)))
+        contentContainer.addView(resolveInput)
+        contentContainer.addView(row(resolveButton, userInfoButton))
+        contentContainer.addView(row(profileButton, subscribePresenceButton))
+        contentContainer.addView(row(markReadButton, presenceButton))
+        contentContainer.addView(section(getString(R.string.section_send_text)))
+        contentContainer.addView(messageInput)
+        contentContainer.addView(sendButton)
+    }
+
+    private fun showGroupsPage() {
+        targetMode = TargetMode.GROUPS
+        sendButton.text = getString(R.string.send_to_selected_group)
+        renderGroupList()
+        contentContainer.addView(section(getString(R.string.section_groups)))
+        contentContainer.addView(row(groupsButton))
+        contentContainer.addView(selectedSummary)
+        contentContainer.addView(contacts)
+        contentContainer.addView(TextView(this).apply {
+            text = getString(R.string.group_receive_not_implemented)
+            textSize = 13f
+        })
+        contentContainer.addView(section(getString(R.string.section_send_text)))
+        contentContainer.addView(messageInput)
+        contentContainer.addView(sendButton)
+    }
+
+    private fun showDebugPage() {
+        contentContainer.addView(section(getString(R.string.section_debug)))
+        contentContainer.addView(row(stateButton, safetyButton))
+        contentContainer.addView(row(exportTraceButton, exportSessionDebugButton))
+        contentContainer.addView(row(disconnectButton))
+        contentContainer.addView(clearSessionButton)
+        contentContainer.addView(TextView(this).apply {
+            text = getString(R.string.debug_private_dir_hint)
+            textSize = 13f
+        })
+    }
+
+    private fun renderContactList() {
+        contacts.choiceMode = ListView.CHOICE_MODE_MULTIPLE
+        contacts.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_multiple_choice, contactItems.map { it.label })
+        for (i in contactItems.indices) {
+            contacts.setItemChecked(i, selectedContactJids.contains(contactItems[i].jid))
+        }
+        contacts.setOnItemClickListener { _, _, position, _ ->
+            val jid = contactItems[position].jid
+            if (contacts.isItemChecked(position)) {
+                selectedContactJids.add(jid)
+            } else {
+                selectedContactJids.remove(jid)
             }
-        )
+            status.text = getString(R.string.contacts_selected_fmt, selectedContactJids.size)
+            refreshSelectedSummary()
+            updateSafetyControls()
+        }
+    }
+
+    private fun renderGroupList() {
+        contacts.choiceMode = ListView.CHOICE_MODE_SINGLE
+        contacts.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_single_choice, groupItems.map { it.label })
+        val selectedIndex = groupItems.indexOfFirst { it.jid == selectedGroupJid }
+        if (selectedIndex >= 0) {
+            contacts.setItemChecked(selectedIndex, true)
+        }
+        contacts.setOnItemClickListener { _, _, position, _ ->
+            selectedGroupJid = groupItems[position].jid
+            status.text = getString(R.string.selected_group_status_fmt, groupItems[position].label)
+            refreshSelectedSummary()
+            updateSafetyControls()
+        }
+    }
+
+    private fun refreshSelectedSummary() {
+        selectedSummary.text = if (targetMode == TargetMode.GROUPS) {
+            if (selectedGroupJid.isBlank()) {
+                getString(R.string.selected_group_none)
+            } else {
+                getString(R.string.selected_group_fmt, shortJid(selectedGroupJid))
+            }
+        } else {
+            val labels = selectedContactJids.take(3).joinToString { shortJid(it) }
+            val suffix = if (selectedContactJids.size > 3) " ..." else ""
+            if (labels.isBlank()) {
+                getString(R.string.selected_contacts_empty)
+            } else {
+                getString(R.string.selected_contacts_fmt, selectedContactJids.size, labels, suffix)
+            }
+        }
+    }
+
+    private fun row(vararg views: View): LinearLayout {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            for (view in views) {
+                (view.parent as? ViewGroup)?.removeView(view)
+                addView(view, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            }
+        }
+    }
+
+    private fun section(title: String): TextView {
+        return TextView(this).apply {
+            text = title
+            textSize = 16f
+        }
+    }
+
+    private fun dp(value: Int): Int {
+        return (value * resources.displayMetrics.density).toInt()
     }
 
     private fun bindBridgeService() {
@@ -281,9 +463,9 @@ class MainActivity : Activity() {
         }
         runCatching {
             bridgeClient.bind()
-            status.text = "Bridge service binding..."
+            status.text = getString(R.string.bridge_binding)
         }.onFailure {
-            status.text = "Bridge bind failed: ${it.message}"
+            status.text = getString(R.string.bridge_bind_failed_fmt, it.message)
         }
     }
 
@@ -300,20 +482,20 @@ class MainActivity : Activity() {
             "connected", "session_restored" -> Unit
             "message_received" -> {
                 val payload = JSONObject(payloadJson)
-                appendConversation("IN ${payload.optString("from_suffix")}: ${payload.optString("text")}")
+                appendConversation(getString(R.string.message_in_fmt, payload.optString("from_suffix"), payload.optString("text")))
             }
             "message_sent" -> {
                 val payload = JSONObject(payloadJson)
                 val clientMsgId = payload.optString("clientMsgId")
                 pendingSends.remove(clientMsgId)
-                appendConversation("SENT ${shortClientMsgId(clientMsgId)} ${payload.optString("server_msg_id")}")
+                appendConversation(getString(R.string.message_sent_fmt, shortClientMsgId(clientMsgId), payload.optString("server_msg_id")))
             }
             "message_failed" -> {
                 val payload = JSONObject(payloadJson)
                 val clientMsgId = payload.optString("clientMsgId")
                 pendingSends.remove(clientMsgId)
                 appendConversation(
-                    "FAILED ${shortClientMsgId(clientMsgId)} ${payload.optString("error_code")}: ${payload.optString("error")}"
+                    getString(R.string.message_failed_fmt, shortClientMsgId(clientMsgId), payload.optString("error_code"), payload.optString("error"))
                 )
             }
             "error" -> appendConversation("$eventType $payloadJson")
@@ -343,22 +525,13 @@ class MainActivity : Activity() {
                 contactItems.clear()
                 contactItems.addAll(items)
                 selectedContactJids.retainAll(contactItems.map { it.jid }.toSet())
-                contacts.choiceMode = ListView.CHOICE_MODE_MULTIPLE
-                contacts.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_multiple_choice, contactItems.map { it.label })
-                for (i in contactItems.indices) {
-                    contacts.setItemChecked(i, selectedContactJids.contains(contactItems[i].jid))
+                status.text = getString(R.string.contacts_count_fmt, items.size)
+                if (currentPage != Page.CONTACTS) {
+                    switchPage(Page.CONTACTS)
+                } else {
+                    renderContactList()
+                    refreshSelectedSummary()
                 }
-                contacts.setOnItemClickListener { _, _, position, _ ->
-                    val jid = contactItems[position].jid
-                    if (contacts.isItemChecked(position)) {
-                        selectedContactJids.add(jid)
-                    } else {
-                        selectedContactJids.remove(jid)
-                    }
-                    status.text = "Contacts selected: ${selectedContactJids.size}"
-                    updateSafetyControls()
-                }
-                status.text = "Contacts: ${items.size}"
                 updateSafetyControls()
             }
         }
@@ -390,18 +563,13 @@ class MainActivity : Activity() {
                 if (groupItems.none { it.jid == selectedGroupJid }) {
                     selectedGroupJid = ""
                 }
-                contacts.choiceMode = ListView.CHOICE_MODE_SINGLE
-                contacts.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_single_choice, groupItems.map { it.label })
-                val selectedIndex = groupItems.indexOfFirst { it.jid == selectedGroupJid }
-                if (selectedIndex >= 0) {
-                    contacts.setItemChecked(selectedIndex, true)
+                status.text = getString(R.string.groups_count_fmt, items.size)
+                if (currentPage != Page.GROUPS) {
+                    switchPage(Page.GROUPS)
+                } else {
+                    renderGroupList()
+                    refreshSelectedSummary()
                 }
-                contacts.setOnItemClickListener { _, _, position, _ ->
-                    selectedGroupJid = groupItems[position].jid
-                    status.text = "Selected group: ${groupItems[position].label}"
-                    updateSafetyControls()
-                }
-                status.text = "Groups: ${items.size}"
                 updateSafetyControls()
             }
         }
@@ -413,7 +581,7 @@ class MainActivity : Activity() {
         }
         val text = messageInput.text.toString()
         if (text.isBlank()) {
-            status.text = "Enter text first"
+            status.text = getString(R.string.enter_text_first)
             return
         }
         if (targetMode == TargetMode.GROUPS) {
@@ -426,12 +594,12 @@ class MainActivity : Activity() {
     private fun sendMultiContactMessage(text: String) {
         val targets = selectedContactJids.toList()
         if (targets.isEmpty()) {
-            status.text = "Select contacts first"
+            status.text = getString(R.string.select_contacts_first)
             return
         }
         val clientMsgId = "android-${UUID.randomUUID()}"
         sendInProgress = true
-        appendConversation("OUT multi pending[${shortClientMsgId(clientMsgId)}] ${targets.size} contacts: $text")
+        appendConversation(getString(R.string.out_multi_pending_fmt, shortClientMsgId(clientMsgId), targets.size, text))
         Thread {
             val result = runCatching {
                 bridgeClient.sendTextMulti(JSONArray(targets).toString(), text, clientMsgId)
@@ -441,7 +609,7 @@ class MainActivity : Activity() {
                 result.onSuccess { payload ->
                     appendMultiSendResult(payload)
                 }.onFailure { err ->
-                    appendConversation("FAILED ${shortClientMsgId(clientMsgId)} bridge_call_failed: ${err.message ?: "unknown"}")
+                    appendConversation(getString(R.string.send_failed_bridge_fmt, shortClientMsgId(clientMsgId), err.message ?: getString(R.string.unknown)))
                 }
                 updateSafetyControls()
             }
@@ -452,19 +620,19 @@ class MainActivity : Activity() {
 
     private fun sendGroupMessage(text: String) {
         if (selectedGroupJid.isBlank()) {
-            status.text = "Select one group first"
+            status.text = getString(R.string.select_one_group_first)
             return
         }
         val clientMsgId = "android-${UUID.randomUUID()}"
         pendingSends[clientMsgId] = PendingSend(selectedGroupJid, text, System.currentTimeMillis())
-        appendConversation("OUT group pending[${shortClientMsgId(clientMsgId)}] $selectedGroupJid: $text")
+        appendConversation(getString(R.string.out_group_pending_fmt, shortClientMsgId(clientMsgId), selectedGroupJid, text))
         val target = selectedGroupJid
         scheduleLocalSendTimeout(clientMsgId)
         Thread {
             val result = runCatching { bridgeClient.sendText(target, text, clientMsgId) }
             mainHandler.post {
                 result.exceptionOrNull()?.let { err ->
-                    markSendFailed(clientMsgId, "bridge_call_failed", err.message ?: "unknown")
+                    markSendFailed(clientMsgId, "bridge_call_failed", err.message ?: getString(R.string.unknown))
                 }
                 updateSafetyControls()
             }
@@ -476,7 +644,7 @@ class MainActivity : Activity() {
     private fun scheduleLocalSendTimeout(clientMsgId: String) {
         mainHandler.postDelayed({
             if (pendingSends.remove(clientMsgId) != null) {
-                appendConversation("FAILED ${shortClientMsgId(clientMsgId)} local_timeout: no terminal send event after ${UI_SEND_TIMEOUT_MS / 1000}s")
+                appendConversation(getString(R.string.local_timeout_fmt, shortClientMsgId(clientMsgId), UI_SEND_TIMEOUT_MS / 1000))
                 updateSafetyControls()
             }
         }, UI_SEND_TIMEOUT_MS)
@@ -487,7 +655,7 @@ class MainActivity : Activity() {
         runBridgeCall {
             bridgeClient.exportTrace(path)
             mainHandler.post {
-                appendConversation("TRACE exported $path")
+                appendConversation(getString(R.string.trace_exported_fmt, path))
             }
         }
     }
@@ -497,7 +665,7 @@ class MainActivity : Activity() {
         runBridgeCall {
             bridgeClient.exportSessionDebug(path)
             mainHandler.post {
-                appendConversation("SESSION_DEBUG exported $path")
+                appendConversation(getString(R.string.session_debug_exported_fmt, path))
             }
         }
     }
@@ -514,7 +682,9 @@ class MainActivity : Activity() {
         qrImage.setImageDrawable(null)
         qrPayload.text = ""
         messageInput.setText("")
-        status.text = "Session cleared"
+        resolveInput.setText("")
+        status.text = getString(R.string.session_cleared)
+        refreshSelectedSummary()
     }
 
     private fun runBridgeCall(onSuccess: (() -> Unit)? = null, block: () -> Unit) {
@@ -523,7 +693,7 @@ class MainActivity : Activity() {
             mainHandler.post {
                 val err = result.exceptionOrNull()
                 if (err != null) {
-                    status.text = "Bridge call failed: ${err.message}"
+                    status.text = getString(R.string.bridge_call_failed_fmt, err.message)
                     updateSafetyControls()
                 } else {
                     onSuccess?.invoke() ?: updateSafetyControls()
@@ -544,7 +714,7 @@ class MainActivity : Activity() {
     private fun runSelectedJidsJsonCall(label: String, block: (String) -> String) {
         val targets = currentSelectedJids()
         if (targets.isEmpty()) {
-            status.text = "Select at least one target first"
+            status.text = getString(R.string.select_at_least_one_target)
             return
         }
         runJsonCall(label) {
@@ -555,7 +725,7 @@ class MainActivity : Activity() {
     private fun runSelectedJidCall(label: String, block: (String) -> String) {
         val jid = currentSelectedJids().firstOrNull()
         if (jid.isNullOrBlank()) {
-            status.text = "Select one target first"
+            status.text = getString(R.string.select_one_target)
             return
         }
         runJsonCall(label) {
@@ -599,39 +769,47 @@ class MainActivity : Activity() {
 
     private fun appendConversation(line: String) {
         conversation.append(line + "\n")
+        logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) }
     }
 
     private fun appendMultiSendResult(payload: String) {
         val array = runCatching { JSONArray(payload) }.getOrElse {
-            appendConversation("MULTI result parse_failed: $payload")
+            appendConversation(getString(R.string.multi_parse_failed_fmt, payload))
             return
         }
         if (array.length() == 0) {
-            appendConversation("MULTI result empty")
+            appendConversation(getString(R.string.multi_result_empty))
             return
         }
         for (i in 0 until array.length()) {
             val item = array.getJSONObject(i)
-            val jid = item.optString("jid", "unknown")
+            val jid = item.optString("jid", getString(R.string.unknown))
             if (item.optBoolean("ok", false)) {
-                appendConversation("MULTI ok $jid ${item.optString("server_msg_id")}")
+                appendConversation(getString(R.string.multi_ok_fmt, jid, item.optString("server_msg_id")))
             } else {
-                appendConversation("MULTI failed $jid ${item.optString("error")}")
+                appendConversation(getString(R.string.multi_failed_fmt, jid, item.optString("error")))
             }
         }
     }
 
     private fun markSendFailed(clientMsgId: String, code: String, message: String) {
         if (pendingSends.remove(clientMsgId) != null) {
-            appendConversation("FAILED ${shortClientMsgId(clientMsgId)} $code: $message")
+            appendConversation(getString(R.string.send_failed_fmt, shortClientMsgId(clientMsgId), code, message))
         }
     }
 
     private fun shortClientMsgId(clientMsgId: String): String {
         if (clientMsgId.isBlank()) {
-            return "unknown"
+            return getString(R.string.unknown)
         }
         return clientMsgId.takeLast(8)
+    }
+
+    private fun shortJid(jid: String): String {
+        if (jid.length <= 12) {
+            return jid
+        }
+        return "...${jid.takeLast(12)}"
     }
 
     private fun makeQr(payload: String): Bitmap {
