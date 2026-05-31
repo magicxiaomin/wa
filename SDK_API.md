@@ -1,6 +1,6 @@
 # Android SDK API
 
-本文件说明 `:wa-sdk` 对外暴露的 Kotlin SDK。定位是本地研究与接口验证：单手机、单账号、无云端、无队列、无调度。集成方只依赖 `WaBridgeClient`，不直接访问底层 AAR、AIDL Stub 或内部 Service。
+本文件说明 `:wa-sdk` 对外暴露的 Kotlin SDK。集成方只依赖 `WaBridgeClient`，不直接访问底层 AAR、AIDL Stub 或内部 Service。
 
 ## 交付物
 

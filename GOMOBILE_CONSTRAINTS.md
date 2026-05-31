@@ -1,26 +1,33 @@
-# GOMOBILE_CONSTRAINTS · 类型约束（PoC 阶段就遵守）
+# GOMOBILE_CONSTRAINTS · Android AAR 边界类型约束
 
-本阶段是桌面 PoC，**不会真的用 gomobile**。但后续 Android 阶段会用 `gomobile bind` 把同一个 wrapper 编成 AAR。gomobile 对跨语言边界的类型有严格限制。**如果 PoC 阶段就遵守这些约束，后续 Android 化几乎零返工；否则要重设计接口。**
+本项目使用 `gomobile bind` 将 Go wrapper 编译成 Android AAR。gomobile 对跨语言边界的类型有严格限制，公开 API 需要保持稳定、简单、可绑定。
 
-## gomobile bind 能跨边界传递的类型（白名单）
+## gomobile bind 可跨边界传递的类型
+
 - 基本类型：`int`, `int64`, `float64`, `bool`, `string`
 - `[]byte`
-- 在你自己的 package 里定义的 `struct` 指针
-- 在你自己的 package 里定义的 `interface`（用于回调）
-- 错误：`error`
+- 在当前 package 中定义的 `struct` 指针
+- 在当前 package 中定义的 `interface`（用于回调）
+- `error`
 
-## **不能**直接跨边界的类型（会导致 bind 失败或不可用）
-- `map`（任何 map）
-- `chan`（channel）
+## 不能直接跨边界的类型
+
+- `map`
+- `chan`
 - 复杂 slice（除 `[]byte` 外的 slice of struct）
 - 函数类型（除非包装成 interface 的方法）
-- **第三方包的类型**——尤其是 whatsmeow 的 `types.JID`、`events.*`、protobuf 生成的 `waProto.*` 等。这些**绝对不能**出现在导出方法的签名里。
+- 第三方包的类型，尤其是内部 JID、event、protobuf 生成类型等。
 
-## 因此的设计铁律
-1. **所有复杂数据（事件 payload、消息对象、状态详情）一律序列化成 JSON 字符串跨边界**。这就是 API_CONTRACT 里回调用 `payloadJSON string` 的原因。
-2. 导出方法的参数和返回值，只用上面白名单里的类型。
-3. whatsmeow 的内部类型（JID、events、proto）只在 wrapper **内部**使用，绝不暴露到导出接口。在 wrapper 内部把它们转成 string / JSON。
-4. 回调用 interface 实现：定义一个 Go interface（如 `EventCallback`，含一个方法），Android 侧 Kotlin 实现它。PoC 阶段桌面可以用普通函数，但**接口形态要预留**，注释说明 Android 化时改成 interface。
+这些类型不能出现在导出方法签名里，否则会导致 bind 失败或生成的 Android API 难以使用。
+
+## API 设计规则
+
+1. 复杂数据（事件 payload、消息对象、状态详情）一律序列化成 JSON string 跨边界。
+2. 导出方法的参数和返回值只使用 gomobile 支持的基础类型。
+3. 内部协议类型只在 Go wrapper 内部使用，导出前转换成 string / JSON。
+4. 回调使用 Go interface 暴露，Android/Kotlin 侧实现该 interface。
+5. Kotlin SDK 再把底层 AAR/API 包装成面向集成方的 `WaBridgeClient`。
 
 ## 一句话
-**把 wrapper 想象成一道墙：墙内是 whatsmeow 的复杂 Go 世界，墙外（导出接口）只有 string / 基本类型 / JSON。** 这道墙现在就建好，Android 化时直接搬。
+
+Go wrapper 是边界层：边界内可以使用复杂 Go 类型，边界外只暴露基础类型、string 和 JSON。

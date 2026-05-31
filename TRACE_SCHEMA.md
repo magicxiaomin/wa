@@ -1,13 +1,8 @@
-# TRACE_SCHEMA · MVP Research Raw Trace 字段定义
+# TRACE_SCHEMA · Trace / Debug 字段定义
 
-> 本文件适用于 Wave 4 之后的 Android whatsmeow MVP 研究模式。
->
-> 重要定位：trace/debug 是本机研究材料，不是生产日志、不是公开审计日志、不是 issue 附件。
-> 本模式允许记录完整业务字段和认证调试材料，以便验证 whatsmeow Android 接口的真实行为。
+本文件定义 SDK 内部 trace 与 session debug 导出的数据形态。trace/debug 用于本机排查、接口验证和回归分析。
 
----
-
-## 1. 每条 trace 事件的结构
+## 1. Trace 事件结构
 
 ```json
 {
@@ -25,27 +20,23 @@
 - `seq`：本进程内单调递增序号。
 - `event`：事件类型。
 - `state`：事件发生时 wrapper 记录的连接状态。
-- `data`：事件原始业务数据。MVP research mode 下不做后四位脱敏。
+- `data`：事件业务数据。
 
----
+## 2. Trace / Debug 可能包含的内容
 
-## 2. MVP Research Raw Trace 允许记录的内容
+trace/debug 可能包含以下字段，使用者需要按敏感调试材料处理：
 
-以下内容允许写入本机 trace/debug 文件：
-
-- 完整 `self_jid` / `UserIDString()` / 当前登录账号 JID。
-- 完整联系人 JID、群 JID、PN JID、LID JID。
-- 完整手机号或 JID user 部分。
+- 当前登录账号 JID / `UserIDString()`。
+- 联系人 JID、群 JID、PN JID、LID JID。
+- 手机号或 JID user 部分。
 - 消息正文。
 - 收发目标、server message ID、receipt / ack 信息。
-- QR code 完整内容。
-- pairing code 完整内容（如果后续实现）。
+- QR code 内容。
+- pairing code 内容（如果后续实现）。
 - session/auth credentials、device store、sqlite session 调试材料。
-- 底层错误原文，包括 whatsmeow / sqlite / network / protocol 错误。
+- 底层错误原文，包括 sqlite / network / protocol 错误。
 
-这些字段可能包含可识别个人身份的信息，或者等同于 linked-device session 的登录钥匙。
-
----
+这些字段可能包含可识别个人身份的信息，或者等同于 linked-device session 的登录钥匙。导出的 trace/debug bundle 不应提交到 git、issue、review 附件或外部服务。
 
 ## 3. 事件 data 示例
 
@@ -117,7 +108,7 @@
 {
   "clientMsgId": "android-uuid",
   "error_code": "send_failed",
-  "error": "raw whatsmeow error including target/text if present",
+  "error": "raw send error",
   "recipient_jid": "8613900000000@s.whatsapp.net",
   "recipient_server": "s.whatsapp.net",
   "used_lid": false
@@ -147,7 +138,7 @@
 }
 ```
 
-### `self_identity`（建议新增）
+### `self_identity`
 
 ```json
 {
@@ -161,40 +152,22 @@
 }
 ```
 
----
+## 4. Session / Auth Debug Bundle
 
-## 4. Session / Auth Debug Bundle（建议新增）
-
-如实现 `ExportSessionDebug(path)`，允许在本机私有目录导出：
+`ExportSessionDebug(path)` 在 App 私有目录导出：
 
 - 当前 trace。
 - `whatsmeow.db` 文件信息或副本。
 - device store / identity / credential 调试字段。
 - 当前 `self_jid`、连接状态、session 文件状态。
 
-限制：
+约束：
 
-- 不自动上传。
-- 不写入云端。
-- 不作为普通导出按钮暴露给非研究用户。
 - 不把 debug bundle 提交到 git。
+- 不把 debug bundle 作为公开日志或 issue 附件。
+- 直连底层 AAR、不经 SDK Service 的调用方，需要自行约束导出路径。
 
----
+## 5. 长度与容量
 
-## 5. 审计口径
-
-Claude / reviewer 审计时请按以下口径判断：
-
-- 记录完整号码、完整 JID、消息正文：**符合 Wave 4 MVP research 需求**。
-- 记录 QR / pairing code：**符合 Wave 4 MVP research 需求**。
-- 记录 session/auth/device store 调试材料到本机：**符合 Wave 4 MVP research 需求**。
-- 自动上传 trace/session/debug bundle：**不符合需求，应判为问题**。
-- 引入 Cloudflare / VPS / 远程触发 / 队列 / 调度：**不符合需求，应判为问题**。
-- 把 raw trace/debug 用于公开发布或分享：**不符合项目定位，应判为文档/流程风险**。
-
----
-
-## 6. 长度与容量
-
-- trace recorder 继续使用环形缓冲，默认最多保留 `5000` 条事件。
-- raw trace 可能包含大字段，后续如验证媒体接口，需要单独设计媒体数据截断策略。
+- trace recorder 使用环形缓冲，默认最多保留 `5000` 条事件。
+- trace 可能包含大字段；如后续验证媒体接口，需要单独设计媒体数据截断策略。
