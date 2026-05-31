@@ -239,8 +239,8 @@ val json = client.sendTextMulti(targets, "hello", "client-msg-id")
 
 ```json
 [
-  {"jid_suffix":"1234","ok":true,"server_msg_id":"ABC","error":""},
-  {"jid_suffix":"5678","ok":false,"server_msg_id":"","error":"send failed"}
+  {"jid":"123@s.im.net","ok":true,"server_msg_id":"ABC","error":""},
+  {"jid":"456@s.im.net","ok":false,"server_msg_id":"","error":"send failed"}
 ]
 ```
 
@@ -281,6 +281,7 @@ client.exportTrace(context.filesDir.resolve("trace.json").absolutePath)
 
 导出本机运行 trace 到 App 私有目录。不会上传网络。
 路径必须位于当前 App 的 `filesDir` 下，否则 SDK 内部服务会拒绝。
+`filesDir` 路径限制由 SDK Service 层（`privateFilesPath`）提供；直连 AAR、不经 SDK Service 的调用方需自行约束导出路径。
 
 ### exportSessionDebug
 
@@ -295,3 +296,4 @@ client.exportSessionDebug(context.filesDir.resolve("session-debug").absolutePath
 
 该目录只用于本机研究和人工排查，不应提交到 git。
 路径必须位于当前 App 的 `filesDir` 下，否则 SDK 内部服务会拒绝。
+`filesDir` 路径限制由 SDK Service 层（`privateFilesPath`）提供；直连 AAR、不经 SDK Service 的调用方需自行约束导出路径。

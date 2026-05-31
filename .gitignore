@@ -2,6 +2,7 @@
 .gomodcache/
 .gopath/
 wa-session/
+session-debug/
 trace.json
 android/.gradle/
 android/.kotlin/

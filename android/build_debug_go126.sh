@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# This script rebuilds wamobile.aar and then extracts generated packaging
+# fragments used by :wa-sdk:
+#   - android/wa-sdk/libs/wamobile-classes.jar
+#   - android/wa-sdk/src/main/jniLibs/arm64-v8a/libgojni.so
+# Rerun this script after any Go bridge change so those fragments stay in sync
+# with the source wamobile.aar.
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TOOLS_DIR="$HOME/.local/share/codex-wa-tools"
 
