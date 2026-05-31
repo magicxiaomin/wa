@@ -58,6 +58,39 @@ client.bind()
 - `presence_update`
 - `error`
 
+### 发送与已读事件 payload
+
+`message_sent` 表示底层已接受发送请求，并返回可用于后续回执关联的 `server_msg_id`：
+
+```json
+{
+  "clientMsgId": "client-msg-id",
+  "server_msg_id": "3EB0...",
+  "latency_ms": 320,
+  "recipient_jid": "123@s.im.net",
+  "recipient_server": "s.im.net",
+  "used_lid": false
+}
+```
+
+`message_ack` 表示同一个 `server_msg_id` 收到送达/已读/播放回执：
+
+```json
+{
+  "server_msg_id": "3EB0...",
+  "ack_level": 2,
+  "latency_ms": 1500
+}
+```
+
+`ack_level` 取值：
+
+- `1`：已送达或默认 receipt。
+- `2`：已读。
+- `3`：已播放，主要用于语音等可播放消息。
+
+集成方可以用 `message_sent.server_msg_id` 建立本地发送记录映射，再用 `message_ack.server_msg_id` 找回对应消息；当 `ack_level >= 2` 时可视为已读或更高等级回执。
+
 ## API
 
 ### bind / unbind
@@ -226,7 +259,7 @@ val json = client.getProfilePictureInfo("123@s.im.net")
 client.sendText("123@s.im.net", "hello", "client-msg-id")
 ```
 
-向单个联系人或单个群发送文本。结果通过 `message_sent` / `message_failed` / `message_ack` 事件返回。
+向单个联系人或单个群发送文本。结果通过 `message_sent` / `message_failed` / `message_ack` 事件返回；其中 `message_sent.server_msg_id` 与后续 `message_ack.server_msg_id` 对应。
 
 ### sendTextMulti
 
