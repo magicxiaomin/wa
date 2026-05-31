@@ -1,7 +1,6 @@
-# ANDROID_PITFALLS · Android / gomobile 特有坑（逐条对照）
+# ANDROID_PITFALLS · Android / gomobile 特有坑
 
-第一波的 KNOWN_PITFALLS 仍然全部有效（事件挂载、panic recover、cgo、context 等）。
-本文件是 Android 集成阶段**新增**的坑。
+`KNOWN_PITFALLS.md` 中的 Go wrapper / 协议客户端注意事项仍然有效。本文件只记录 Android、gomobile、AIDL、ForegroundService 相关的额外风险。
 
 ---
 
@@ -12,7 +11,7 @@
 路径：whatsmeow goroutine → wrapper 回调 → AIDL 跨进程 → 主进程 → `Looper.getMainLooper()` 切主线程 → 更新 UI。
 **任何一段省了切换都会崩或丢事件。** 这是本波最容易出错、最难排查的地方，务必一开始就设计对。
 
-## 2. gomobile bind 的类型限制（再次强调，Android 阶段会真碰到）
+## 2. gomobile bind 的类型限制
 - 导出方法签名只能用 string/int/bool/[]byte/自定义interface。
 - 复杂数据（联系人列表、消息对象）一律 JSON 字符串。
 - whatsmeow 的 types.JID / events.* / proto 类型**绝不能**出现在导出签名里。
@@ -21,7 +20,7 @@
 ## 3. cgo + sqlite → 优先 modernc.org/sqlite
 - whatsmeow 默认 sqlite 驱动 mattn/go-sqlite3 依赖 cgo，Android 交叉编译要配 NDK 的 C 工具链，复杂且增大体积。
 - **优先用 modernc.org/sqlite（纯 Go，无 cgo）**，让 gomobile 编译大幅简化。
-- 第一波若已用纯 Go 驱动，这里直接延续。
+- 当前项目优先使用纯 Go sqlite 驱动，避免 Android 交叉编译时引入 cgo 复杂度。
 
 ## 4. ForegroundService 在 Android 14/15 的限制（收消息常驻必须面对）
 - Android 14（API 34）：前台服务必须声明 `foregroundServiceType`。本场景用 `dataSync`。

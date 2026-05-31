@@ -1,65 +1,93 @@
-# wa · WhatsApp 本地 Bridge — PoC 阶段
+# wa · Android SDK 接口研究模块
 
-> 当前审计请以 `SPEC_WAVE4.md`、`ACCEPTANCE_WAVE4.md`、`TRACE_SCHEMA.md`、
-> `CLAUDE_REVIEW_HANDOFF_WAVE4_MVP.md` 为准。本文保留第一波 PoC 的历史说明。
-> Wave 4 MVP research mode 已经移除 3 人上限，并允许 raw trace/debug 记录完整业务字段和认证调试材料。
+`wa` 是一个本地 Android SDK 研究项目，用来验证 Go IM 协议客户端在 Android 真机上的可集成性、接口健壮性和运行边界。项目当前定位是：单手机、单账号、本地运行、不上云、不做队列或调度、不做多账号框架。
 
-> 本仓库当前处于**第一波：桌面 Go PoC**。目标是用最低成本验证
-> `whatsmeow` + 测试号能否连接、发消息、恢复 session —— 一票决定项目是否进入 Android 阶段。
+当前主线已经完成 SDK 模块化：
 
-## 给执行 agent（Codex）的入口
+- `:wa-sdk`：Android library module，封装 AIDL、`:wa_bridge` 前台服务、`wamobile.aar`，对外暴露 `WaBridgeClient`。
+- `:sample-app`：SDK 验证台，只通过 `WaBridgeClient` 调用能力，不直接访问 AIDL、内部 Service 或底层 AAR。
+- `bridge/`：Go wrapper，通过 gomobile 编译成 Android AAR，所有复杂入参/返回值使用 JSON string。
 
-**请先读 [`SPEC.md`](./SPEC.md)，它是本任务的宪法。**
+## 当前能力
 
-完整阅读顺序：
-1. [`SPEC.md`](./SPEC.md) — 目标、范围、非目标、分阶段（**先读这个**）
-2. [`API_CONTRACT.md`](./API_CONTRACT.md) — 要实现的接口与事件类型
-3. [`GOMOBILE_CONSTRAINTS.md`](./GOMOBILE_CONSTRAINTS.md) — 类型约束（PoC 就遵守，省后续返工）
-4. [`KNOWN_PITFALLS.md`](./KNOWN_PITFALLS.md) — 已知坑（**逐条对照**，项目特有知识）
-5. [`ACCEPTANCE.md`](./ACCEPTANCE.md) — 验收 checklist
-6. [`TRACE_SCHEMA.md`](./TRACE_SCHEMA.md) — Wave 4 MVP research raw trace 字段要求
+- 扫码登录与 session 恢复。
+- 获取联系人与已加入群列表。
+- 发送 1:1 文本消息。
+- 向多个联系人发送同一文本，用于本地接口研究。
+- 向单个群发送文本。
+- 接收 1:1 文本消息。
+- 查询当前登录账号身份信息。
+- 查询用户信息、头像信息、presence，标记已读。
+- 导出本机 raw trace 与 session debug 文件。
 
-启动指令见 [`00_如何使用.md`](./00_如何使用.md) 末尾的"可直接粘给 Codex 的启动 prompt"。
+## 已知限制
 
-## 范围红线（重要）
+- 不支持接收群消息内容；当前 wrapper 会过滤群消息接收事件。
+- 不做媒体消息。
+- 不做多账号、多手机、多租户。
+- 不做云端、远程触发、Web 控制台、队列、调度、对象存储。
+- 不把 trace/session/debug bundle 自动上传或外发。
+- sample app 是 SDK API 验证台，不是正式聊天产品 UI。
 
-- 本阶段**只做桌面 Go PoC**。
-- **禁止**写任何 Android / gomobile / AAR / Kotlin 代码——那是后续阶段。
-- **禁止**群发 / 多账号 / 收消息 / 后台静默 / 风控规避。
-- `SendTextForTest` 必须内置白名单 + 发送计数上限（防滥用）。
+## 快速构建
 
-## 技术栈（锁定）
+本仓库固定使用 Go 1.26.3、gomobile、Android Gradle Plugin 与本机 Android SDK/NDK 工具链。工具链路径见 [`ANDROID_BUILD_TOOLCHAIN.md`](./ANDROID_BUILD_TOOLCHAIN.md)。
 
-Go + [`go.mau.fi/whatsmeow`](https://pkg.go.dev/go.mau.fi/whatsmeow)，命令行程序，本地 session 持久化。
-不使用 c-shared/JNA、不使用 Baileys、不使用 Cloud API、不使用 WebView 注入（理由见 SPEC）。
-
-## Step 1 运行
-
-```powershell
-go run ./cmd/wa-poc -data-dir ./wa-session -device-name wa-desktop-poc
+```bash
+./android/build_debug_go126.sh
 ```
 
-启动后看到 `bridge_started` 表示 wrapper 和本地 session store 初始化完成。全新 session 下应随后看到 `qr_generated`，终端会打印可扫码的二维码；下方也会保留 QR payload 文本作为兜底。用测试小号在 WhatsApp 的 Linked Devices 里扫码后，看到 `connected` 表示 Step 1 跑通。
+脚本会完成：
 
-程序退出时会尝试导出 `trace.json`。Step 1 的 trace 只记录二维码长度等脱敏信息，不写入 QR 完整内容。
+1. 用 Go 1.26.3 重编 `wamobile.aar`。
+2. 同步 `android/libs/wamobile.aar`。
+3. 拆出 `android/wa-sdk/libs/wamobile-classes.jar` 与 `android/wa-sdk/src/main/jniLibs/arm64-v8a/libgojni.so`。
+4. 构建 `:wa-sdk:assembleRelease`。
+5. 构建 `:sample-app:assembleDebug`。
+6. 输出 `android/libs/wa-sdk-release.aar`。
 
-## Step 2 运行
+安装验证台：
 
-先确认测试接收号码在 [`bridge/client.go`](./bridge/client.go) 的 `allowedTestNumbers` 硬编码白名单内。号码必须是完整国家码格式，不带 `+`、空格或横线。
-
-```powershell
-go run ./cmd/wa-poc `
-  -data-dir ./wa-session `
-  -device-name wa-desktop-poc `
-  -send-to 15551234567 `
-  -text "hello from wa poc"
+```bash
+adb install -r android/sample-app/build/outputs/apk/debug/sample-app-debug.apk
 ```
 
-已有 session 时，程序应直接进入 `connected` / `session_restored`，随后输出 `message_send_start` 和 `message_sent`。`message_sent` 的 payload 里应包含 `clientMsgId` 和服务器返回的 `server_msg_id`。
+## SDK 集成入口
 
-发送 trace 不记录消息正文和完整手机号，只记录文本长度、号码后四位、服务器 message ID 和延迟。
+外部 Android app 集成时只依赖 `wa-sdk-release.aar`，并通过 `WaBridgeClient` 调用公开 API。
 
-## 合规提醒
+核心文件：
 
-whatsmeow 是非官方库，连接个人号的 Linked Device，违反 WhatsApp 条款、有封号风险。
-**PoC 必须用一个不重要的测试小号，绝不用主力号。**
+- [`SDK_API.md`](./SDK_API.md)：SDK 方法、JSON 形状、线程语义、错误模型、最小集成步骤。
+- [`android/wa-sdk/src/main/java/com/magicxiaomin/wa/sdk/WaBridgeClient.kt`](./android/wa-sdk/src/main/java/com/magicxiaomin/wa/sdk/WaBridgeClient.kt)：SDK Kotlin 客户端。
+- [`android/wa-sdk/src/main/AndroidManifest.xml`](./android/wa-sdk/src/main/AndroidManifest.xml)：SDK Manifest，声明 `:wa_bridge` 前台服务和权限。
+
+最小调用流程：
+
+```kotlin
+val client = WaBridgeClient(context, "WA-Android")
+client.setEventListener { eventType, payloadJson ->
+    // 回调已由 SDK 切回 Main Looper
+}
+client.bind()
+client.connectBridge()
+val identity = client.getSelfIdentity()
+val contacts = client.getContacts()
+```
+
+SDK 方法是同步 AIDL 调用。集成方应把耗时调用放到后台线程；事件回调由 SDK 保证回到主线程。
+
+## 文档入口
+
+- [`SDK_API.md`](./SDK_API.md)：集成方 API 手册。
+- [`SPEC_WAVE5.md`](./SPEC_WAVE5.md)：当前 SDK 模块化设计与不变量。
+- [`ACCEPTANCE_WAVE5.md`](./ACCEPTANCE_WAVE5.md)：当前回归基线。
+- [`SPEC_WAVE4.md`](./SPEC_WAVE4.md)：本地研究红线与 raw trace/debug 边界。
+- [`TRACE_SCHEMA.md`](./TRACE_SCHEMA.md)：raw trace 字段定义。
+- [`GOMOBILE_CONSTRAINTS.md`](./GOMOBILE_CONSTRAINTS.md)：gomobile 边界。
+- [`ANDROID_PITFALLS.md`](./ANDROID_PITFALLS.md)：Android 真机坑清单。
+- [`KNOWN_PITFALLS.md`](./KNOWN_PITFALLS.md)：Go wrapper / 协议客户端坑清单。
+
+## 研究边界
+
+本项目只用于本机研究和接口验证。raw trace/debug 可能包含完整 JID、消息正文、QR/pairing code、session/auth 调试材料。这些文件只应保存在本机私有目录，不应提交到 git、issue、review 附件或外部服务。
